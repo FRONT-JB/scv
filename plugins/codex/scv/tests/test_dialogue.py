@@ -53,6 +53,31 @@ class SCVDialogueTests(unittest.TestCase):
 
         self.assertEqual(expected, scv_dialogue.SCV_PROGRESS_LINES)
 
+    def test_execution_stages_use_actual_scv_lines(self) -> None:
+        expected = {
+            "starting": "Reportin' for duty.",
+            "worker": "Orders received.",
+            "acceptance": "Affirmative.",
+            "verifier": "I read you.",
+            "failure-analysis": "Come again, Cap'n?",
+            "retry": "SCV good to go, sir.",
+            "step-complete": "Job's finished.",
+            "final-acceptance": "Affirmative.",
+            "final-verifier": "I read you.",
+            "complete": "Job's finished.",
+            "blocked": "I can't build there.",
+            "failed": "I can't build there.",
+            "cancelled": "I'm not readin' you clearly.",
+        }
+
+        self.assertEqual(expected, scv_dialogue.SCV_STAGE_LINES)
+        self.assertEqual(
+            "Come again, Cap'n?",
+            scv_dialogue.decorate_scv_output(
+                {"status": "running", "stage": "failure-analysis"}
+            )["scv_line"],
+        )
+
     def test_output_decoration_is_computed_without_mutating_state(self) -> None:
         payload = {"task_id": "dialogue", "state": State.READY.value}
 

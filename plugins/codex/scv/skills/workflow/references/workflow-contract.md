@@ -61,6 +61,22 @@ progress reports render it as `STATE — "<scv_line>"`; machines must continue t
 branch on the lifecycle state and exit code. Executor status output applies the
 same presentation rule to `pending`, `running`, `ready`, and failure statuses.
 
+While a full task is `EXECUTING`, `status TASK_ID` also returns a sanitized
+`execution_progress` object. It contains only `status`, `stage`, completed and
+total step counts, the current step ID/position/status when applicable, the
+bounded attempt number, a controller-authored message, `updated_at`, and the
+computed stage `scv_line`. It never returns plan instructions, prompts, raw
+stdout/stderr, acceptance output, findings, evidence bodies, or environment
+values. The snapshot is read from an atomically replaced v1 index without taking
+the executor's exclusive run lock, and its task, plan, base, and workspace
+bindings must match the durable task before it is returned.
+
+Public execution stages are `starting`, `worker`, `acceptance`, `verifier`,
+`failure-analysis`, `retry`, `step-complete`, `final-acceptance`,
+`final-verifier`, `complete`, `blocked`, `failed`, and `cancelled`. Consumers
+must treat `stage` as progress presentation and the top-level lifecycle `state`
+and command exit code as authoritative control signals.
+
 ## Control-plane commands
 
 All commands use this prefix:

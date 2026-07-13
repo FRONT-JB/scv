@@ -855,7 +855,98 @@ class SCVControlPlaneTests(unittest.TestCase):
             State.READY.value, self.store.load("ready-status-evidence")["state"]
         )
 
-    def test_real_subprocess_contract_reaches_handoff_with_fake_codex(self) -> None:
+    def test_status_reports_sanitized_progress_while_executor_owns_run_lock(self) -> None:
+        self.full_task_through_plan("active-progress")
+        task = scv.command_materialize(
+            self.args(task_id="active-progress", worktree=None, branch=None),
+            self.store,
+            self.repo,
+        )
+        plan_sha256 = task["artifacts"]["plan"]["sha256"]
+        run_dir = self.store.task_dir("active-progress") / "runs" / plan_sha256
+        execute.atomic_write_json(
+            run_dir / "index.json",
+            {
+                "schema_version": 1,
+                "task_id": "active-progress",
+                "plan_sha256": plan_sha256,
+                "expected_base_sha": task["base"]["sha"],
+                "workspace": str(Path(task["worktree"]["path"]).resolve()),
+                "status": "running",
+                "updated_at": "2026-07-13T00:00:00Z",
+                "progress": {
+                    "stage": "worker",
+                    "step_id": "step-1",
+                    "step_position": 1,
+                    "total_steps": 1,
+                    "attempt": 2,
+                },
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "status": "running",
+                        "attempts": [],
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+        revision = task["revision"]
+
+        with execute.run_directory_lock(run_dir):
+            status = scv.command_status(
+                self.args(task_id="active-progress"), self.store, self.repo
+            )
+
+        self.assertEqual(State.EXECUTING.value, status["state"])
+        self.assertEqual(revision, status["revision"])
+        self.assertEqual(
+            {
+                "status": "running",
+                "stage": "worker",
+                "completed_steps": 0,
+                "total_steps": 1,
+                "current_step": {
+                    "id": "step-1",
+                    "position": 1,
+                    "total": 1,
+                    "status": "running",
+                },
+                "attempt": 2,
+                "message": "step-1의 2차 worker가 구현을 진행하고 있습니다.",
+                "updated_at": "2026-07-13T00:00:00Z",
+                "scv_line": "Orders received.",
+            },
+            status["execution_progress"],
+        )
+
+    def test_status_reports_starting_progress_before_executor_creates_index(self) -> None:
+        self.full_task_through_plan("starting-progress")
+        task = scv.command_materialize(
+            self.args(task_id="starting-progress", worktree=None, branch=None),
+            self.store,
+            self.repo,
+        )
+
+        status = scv.command_status(
+            self.args(task_id="starting-progress"), self.store, self.repo
+        )
+
+        self.assertEqual(State.EXECUTING.value, status["state"])
+        self.assertEqual(
+            {
+                "status": "pending",
+                "stage": "starting",
+                "completed_steps": 0,
+                "total_steps": 1,
+                "message": "실행 환경을 준비하고 있습니다.",
+                "scv_line": "Reportin' for duty.",
+            },
+            status["execution_progress"],
+        )
+        self.assertEqual(task["revision"], status["revision"])
+
+    def test_real_subprocess_contract_reaches_ready_with_fake_codex(self) -> None:
         self.full_task_through_plan("subprocess-task")
         scv.command_materialize(
             self.args(task_id="subprocess-task", worktree=None, branch=None),
@@ -891,7 +982,13 @@ schema = Path(args[args.index('--output-schema') + 1]).name
 if 'verifier' in schema:
     value = {'verdict': 'pass', 'summary': '검증 통과', 'findings': []}
 else:
-    value = {'summary': '작업 완료', 'changed_files': [], 'tests_run': [], 'risks': []}
+    Path('README.md').write_text('implemented\\n', encoding='utf-8')
+    value = {
+        'summary': '작업 완료',
+        'changed_files': ['README.md'],
+        'tests_run': ['git diff --check'],
+        'risks': [],
+    }
 output.write_text(json.dumps(value), encoding='utf-8')
 print(json.dumps({'type': 'result'}))
 """,
@@ -922,9 +1019,27 @@ print(json.dumps({'type': 'result'}))
         )
 
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(State.HANDOFF.value, self.store.load("subprocess-task")["state"])
-        execution = self.store.load("subprocess-task")["artifacts"]["execution"]
+        handoff = self.store.load("subprocess-task")
+        self.assertEqual(State.HANDOFF.value, handoff["state"])
+        execution = handoff["artifacts"]["execution"]
         self.assertTrue((self.store.task_dir("subprocess-task") / execution["path"]).is_file())
+        worktree = Path(handoff["worktree"]["path"])
+        self.assertEqual("implemented\n", (worktree / "README.md").read_text())
+        self.assertEqual("base\n", (self.repo / "README.md").read_text())
+
+        ready = scv.command_handoff(
+            self.args(task_id="subprocess-task"), self.store, self.repo
+        )
+        self.assertEqual(State.READY.value, ready["state"])
+        self.assertTrue(worktree.is_dir())
+        self.assertIn(
+            "README.md",
+            (self.store.task_dir("subprocess-task") / "handoff.md").read_text(),
+        )
+        status = scv.command_status(
+            self.args(task_id="subprocess-task"), self.store, self.repo
+        )
+        self.assertEqual("verified", status["execution_integrity"]["status"])
 
     def test_improve_approves_candidate_only_with_ready_execution_evidence(self) -> None:
         task_id = "learning-approval"

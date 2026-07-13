@@ -227,6 +227,24 @@ class FakeRunner:
         raise AssertionError(f"unexpected command: {argv}")
 
 
+class ProgressObservingRunner(FakeRunner):
+    def __init__(self, root: Path, sha: str, run_dir: Path) -> None:
+        super().__init__(root, sha)
+        self.run_dir = run_dir
+        self.progress: list[tuple[str, int | None]] = []
+
+    def run(self, argv, **kwargs):
+        index_path = self.run_dir / "index.json"
+        if index_path.is_file():
+            value = json.loads(index_path.read_text(encoding="utf-8"))
+            progress = value.get("progress")
+            if isinstance(progress, dict) and isinstance(progress.get("stage"), str):
+                current = (progress["stage"], progress.get("attempt"))
+                if not self.progress or self.progress[-1] != current:
+                    self.progress.append(current)
+        return super().run(argv, **kwargs)
+
+
 class ExecutorTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -272,6 +290,16 @@ class ExecutorTestCase(unittest.TestCase):
 
     def read_index(self) -> dict:
         return json.loads((self.run_dir / "index.json").read_text(encoding="utf-8"))
+
+    def read_progress(self) -> dict:
+        plan = execute.load_plan(self.plan_path, self.sha)
+        return execute.read_progress(
+            self.run_dir,
+            task_id=plan.task_id,
+            plan_sha256=plan.sha256,
+            expected_base_sha=self.sha,
+            workspace=self.root,
+        )
 
     def codex_calls(self, runner: FakeRunner) -> list[dict[str, object]]:
         return [
@@ -387,6 +415,269 @@ class ExecutorTestCase(unittest.TestCase):
         self.assertRegex(index["final_validation"]["evidence_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual("ready", execute.read_status(self.run_dir)["status"])
 
+    def test_progress_snapshot_is_sanitized_and_readable_while_run_is_locked(self) -> None:
+        self.run_dir.mkdir(parents=True)
+        index = {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "plan_sha256": "b" * 64,
+            "expected_base_sha": self.sha,
+            "workspace": str(self.root.resolve()),
+            "status": "running",
+            "updated_at": "2026-07-13T00:00:00Z",
+            "progress": {
+                "stage": "failure-analysis",
+                "step_id": "step-1",
+                "step_position": 1,
+                "total_steps": 1,
+                "attempt": 1,
+                "secret": "must-not-leak",
+            },
+            "steps": [
+                {
+                    "id": "step-1",
+                    "status": "pending",
+                    "attempts": [
+                        {
+                            "number": 1,
+                            "status": "failed",
+                            "failure": {"message": "sensitive failure output"},
+                        }
+                    ],
+                    "blockers": [],
+                }
+            ],
+        }
+        execute.atomic_write_json(self.run_dir / "index.json", index)
+
+        with execute.run_directory_lock(self.run_dir):
+            progress = execute.read_progress(
+                self.run_dir,
+                task_id="task-1",
+                plan_sha256="b" * 64,
+                expected_base_sha=self.sha,
+                workspace=self.root,
+            )
+
+        self.assertEqual(
+            {
+                "status": "running",
+                "stage": "failure-analysis",
+                "completed_steps": 0,
+                "total_steps": 1,
+                "current_step": {
+                    "id": "step-1",
+                    "position": 1,
+                    "total": 1,
+                    "status": "pending",
+                },
+                "attempt": 1,
+                "message": "step-1의 1차 실패 원인을 분석하고 있습니다.",
+                "updated_at": "2026-07-13T00:00:00Z",
+            },
+            progress,
+        )
+        self.assertNotIn("secret", json.dumps(progress))
+        self.assertNotIn("sensitive", json.dumps(progress))
+
+        with self.assertRaisesRegex(execute.StateError, "연결이 일치하지 않습니다"):
+            execute.read_progress(
+                self.run_dir,
+                task_id="another-task",
+                plan_sha256="b" * 64,
+                expected_base_sha=self.sha,
+                workspace=self.root,
+            )
+
+        index["progress"]["stage"] = "untrusted-stage"
+        execute.atomic_write_json(self.run_dir / "index.json", index)
+        with self.assertRaisesRegex(execute.StateError, "진행 단계"):
+            execute.read_progress(
+                self.run_dir,
+                task_id="task-1",
+                plan_sha256="b" * 64,
+                expected_base_sha=self.sha,
+                workspace=self.root,
+            )
+
+    def test_progress_snapshot_infers_legacy_v1_index_without_mutating_it(self) -> None:
+        self.run_dir.mkdir(parents=True)
+        index = {
+            "schema_version": 1,
+            "task_id": "task-1",
+            "plan_sha256": "c" * 64,
+            "expected_base_sha": self.sha,
+            "workspace": str(self.root.resolve()),
+            "status": "running",
+            "updated_at": "2026-07-13T00:00:00Z",
+            "steps": [
+                {
+                    "id": "step-1",
+                    "status": "running",
+                    "attempts": [{"number": 1, "status": "running"}],
+                    "blockers": [],
+                }
+            ],
+        }
+        execute.atomic_write_json(self.run_dir / "index.json", index)
+        before = (self.run_dir / "index.json").read_bytes()
+
+        progress = execute.read_progress(
+            self.run_dir,
+            task_id="task-1",
+            plan_sha256="c" * 64,
+            expected_base_sha=self.sha,
+            workspace=self.root,
+        )
+
+        self.assertEqual("worker", progress["stage"])
+        self.assertEqual(1, progress["attempt"])
+        self.assertEqual(before, (self.run_dir / "index.json").read_bytes())
+
+    def test_progress_summary_covers_every_public_stage(self) -> None:
+        cases = {
+            "starting": ("running", "pending", None, None, "실행 환경을 준비하고 있습니다."),
+            "worker": ("running", "running", "step-1", 1, "step-1의 1차 worker가 구현을 진행하고 있습니다."),
+            "acceptance": ("running", "running", "step-1", 1, "step-1의 1차 인수 조건을 검사하고 있습니다."),
+            "verifier": ("running", "running", "step-1", 1, "step-1의 1차 결과를 읽기 전용으로 검증하고 있습니다."),
+            "failure-analysis": ("running", "pending", "step-1", 1, "step-1의 1차 실패 원인을 분석하고 있습니다."),
+            "retry": ("running", "pending", "step-1", 2, "step-1의 2차 재시도를 준비하고 있습니다."),
+            "step-complete": ("running", "passed", "step-1", 1, "step-1 단계를 완료했습니다."),
+            "final-acceptance": ("running", "passed", None, None, "전체 인수 조건을 다시 검사하고 있습니다."),
+            "final-verifier": ("running", "passed", None, None, "전체 결과를 읽기 전용으로 최종 검증하고 있습니다."),
+            "complete": ("ready", "passed", None, None, "모든 실행과 검증을 완료했습니다."),
+            "blocked": ("blocked", "pending", None, None, "실행 환경 또는 기준 조건 때문에 진행이 차단되었습니다."),
+            "failed": ("failed", "failed", None, None, "승인된 실행이 검증을 통과하지 못했습니다."),
+            "cancelled": ("cancelled", "cancelled", None, None, "실행이 취소되었습니다."),
+        }
+
+        for stage, (status, step_status, step_id, attempt, message) in cases.items():
+            with self.subTest(stage=stage):
+                progress = {
+                    "stage": stage,
+                    "step_id": step_id,
+                    "step_position": 1 if step_id is not None else None,
+                    "total_steps": 1,
+                    "attempt": attempt,
+                }
+                summary = execute.summarize_execution_progress(
+                    {
+                        "schema_version": 1,
+                        "status": status,
+                        "updated_at": "2026-07-13T00:00:00Z",
+                        "progress": progress,
+                        "steps": [
+                            {
+                                "id": "step-1",
+                                "status": step_status,
+                                "attempts": [],
+                                "blockers": [],
+                            }
+                        ],
+                    }
+                )
+                self.assertEqual(stage, summary["stage"])
+                self.assertEqual(message, summary["message"])
+
+        invalid = {
+            "schema_version": 1,
+            "status": "ready",
+            "progress": {
+                "stage": "worker",
+                "step_id": "step-1",
+                "step_position": 1,
+                "total_steps": 1,
+                "attempt": 1,
+            },
+            "steps": [
+                {
+                    "id": "step-1",
+                    "status": "running",
+                    "attempts": [],
+                    "blockers": [],
+                }
+            ],
+        }
+        with self.assertRaisesRegex(execute.StateError, "완료 상태"):
+            execute.summarize_execution_progress(invalid)
+
+    def test_progress_reader_rejects_symlink_and_oversized_index(self) -> None:
+        self.run_dir.mkdir(parents=True)
+        external = self.base / "external-index.json"
+        external.write_text("{}", encoding="utf-8")
+        os.symlink(external, self.run_dir / "index.json")
+
+        with self.assertRaises(execute.StateError):
+            execute.read_progress(
+                self.run_dir,
+                task_id="task-1",
+                plan_sha256="d" * 64,
+                expected_base_sha=self.sha,
+                workspace=self.root,
+            )
+
+        (self.run_dir / "index.json").unlink()
+        execute.atomic_write_json(
+            self.run_dir / "index.json",
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "plan_sha256": "d" * 64,
+                "expected_base_sha": self.sha,
+                "workspace": str(self.root.resolve()),
+                "status": "running",
+                "progress": {
+                    "stage": "starting",
+                    "step_id": None,
+                    "step_position": None,
+                    "total_steps": 1,
+                    "attempt": None,
+                },
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "status": "pending",
+                        "attempts": [],
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+        with mock.patch.object(execute, "MAX_PROGRESS_INDEX_BYTES", 32):
+            with self.assertRaisesRegex(execute.StateError, "허용 크기"):
+                execute.read_progress(
+                    self.run_dir,
+                    task_id="task-1",
+                    plan_sha256="d" * 64,
+                    expected_base_sha=self.sha,
+                    workspace=self.root,
+                )
+
+    def test_executor_persists_worker_acceptance_verifier_and_final_progress(self) -> None:
+        self.write_plan()
+        runner = ProgressObservingRunner(self.root, self.sha, self.run_dir)
+
+        outcome = self.execute(runner)
+
+        self.assertTrue(outcome.ready)
+        for stage in (
+            "starting",
+            "worker",
+            "acceptance",
+            "verifier",
+            "step-complete",
+            "final-acceptance",
+            "final-verifier",
+        ):
+            self.assertTrue(
+                any(observed_stage == stage for observed_stage, _ in runner.progress),
+                runner.progress,
+            )
+        progress = self.read_progress()
+        self.assertEqual("complete", progress["stage"])
+        self.assertEqual("ready", progress["status"])
+        self.assertEqual(1, progress["completed_steps"])
+
     def test_workspace_fingerprint_failure_blocks_ready(self) -> None:
         self.write_plan()
         runner = FakeRunner(self.root, self.sha)
@@ -404,6 +695,7 @@ class ExecutorTestCase(unittest.TestCase):
         self.assertEqual("blocked", index["status"])
         self.assertNotIn("workspace_sha256", index)
         self.assertIn("지문 수집 실패", index["reason"])
+        self.assertEqual("blocked", self.read_progress()["stage"])
 
     def test_controller_runs_final_acceptance(self) -> None:
         self.write_plan(final_acceptance=["python -m unittest discover"])
@@ -476,6 +768,21 @@ class ExecutorTestCase(unittest.TestCase):
         self.assertEqual(["python -m unittest"], shell_commands)
         self.assertEqual(2, self.read_index()["final_validation"]["number"])
 
+    def test_legacy_ready_index_without_progress_does_not_trigger_reexecution(self) -> None:
+        self.write_plan()
+        self.assertTrue(self.execute(FakeRunner(self.root, self.sha)).ready)
+        index = self.read_index()
+        index.pop("progress")
+        execute.atomic_write_json(self.run_dir / "index.json", index)
+        runner = FakeRunner(self.root, self.sha)
+
+        outcome = self.execute(runner)
+
+        self.assertTrue(outcome.ready)
+        self.assertEqual([], self.codex_calls(runner))
+        self.assertNotIn("progress", self.read_index())
+        self.assertEqual("complete", self.read_progress()["stage"])
+
     def test_acceptance_failure_retries_exactly_three_persisted_attempts(self) -> None:
         self.write_plan()
         runner = FakeRunner(self.root, self.sha)
@@ -492,6 +799,9 @@ class ExecutorTestCase(unittest.TestCase):
         prompts = [call["input"] for call in self.codex_calls(runner)]
         self.assertNotIn("Previous controller failure", prompts[0])
         self.assertIn("Controller retry context", prompts[1])
+        progress = self.read_progress()
+        self.assertEqual("failed", progress["stage"])
+        self.assertEqual(3, progress["attempt"])
 
     def test_success_path_does_not_invoke_failure_analyst(self) -> None:
         self.write_plan()
@@ -506,7 +816,7 @@ class ExecutorTestCase(unittest.TestCase):
 
     def test_acceptance_failure_is_analyzed_and_creates_candidate_after_retry(self) -> None:
         self.write_plan()
-        runner = FakeRunner(self.root, self.sha)
+        runner = ProgressObservingRunner(self.root, self.sha, self.run_dir)
         runner.acceptance_behaviors = [1, 0, 0]
         learning_root = self.base / "learning"
 
@@ -540,6 +850,9 @@ class ExecutorTestCase(unittest.TestCase):
         lessons = execute.LearningStore(learning_root).list_lessons()
         self.assertEqual(1, len(lessons))
         self.assertEqual("candidate", lessons[0]["status"])
+        self.assertIn(("failure-analysis", 1), runner.progress)
+        self.assertIn(("retry", 2), runner.progress)
+        self.assertIn(("worker", 2), runner.progress)
 
     def test_failure_analyst_prompt_redacts_plan_secrets(self) -> None:
         self.write_plan(
@@ -1239,6 +1552,7 @@ class ExecutorTestCase(unittest.TestCase):
         self.assertEqual(index["status"], "cancelled")
         self.assertEqual(len(index["steps"][0]["attempts"]), 1)
         self.assertEqual(index["steps"][0]["attempts"][0]["status"], "cancelled")
+        self.assertEqual("cancelled", self.read_progress()["stage"])
 
     def test_initial_base_mismatch_blocks_before_codex(self) -> None:
         self.write_plan()
@@ -1266,6 +1580,7 @@ class ExecutorTestCase(unittest.TestCase):
             r"^[0-9a-f]{64}$",
         )
         self.assertEqual("blocked", execute.read_status(self.run_dir)["status"])
+        self.assertEqual("blocked", self.read_progress()["stage"])
         flattened = [part for call in runner.calls for part in call["argv"]]
         self.assertNotIn("push", flattened)
         self.assertNotIn("reset", flattened)
@@ -1648,6 +1963,7 @@ class ExecutorTestCase(unittest.TestCase):
         self.assertEqual([], index["steps"][0]["blockers"])
         self.assertIn("샌드박스", index["reason"])
         self.assertEqual([], self.codex_calls(runner))
+        self.assertEqual("blocked", self.read_progress()["stage"])
 
     def test_unhashable_failure_evidence_becomes_non_consuming_blocker(self) -> None:
         self.write_plan()

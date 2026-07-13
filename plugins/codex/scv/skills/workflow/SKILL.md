@@ -83,6 +83,16 @@ Run the approved plan only inside the materialized worktree. Invoke the followin
 python3 "<plugin-root>/scripts/scv.py" --repo "<repo>" execute <task-id> [--timeout <seconds>]
 ```
 
+Start `execute` as one long-running host command and keep the returned exec/session
+handle until it exits. While it is running, invoke the read-only `status <task-id>`
+command separately every 15–30 seconds. `status` reads an atomically published,
+sanitized snapshot and does not contend with the executor's run lock. Report only
+changed `execution_progress` values as
+`EXECUTING — "<execution_progress.scv_line>" — step X/Y, <stage>, attempt N, sir.`
+Keep polling the original process handle as well; never launch a second `execute`
+to obtain progress. The public snapshot intentionally omits prompts, raw command
+output, evidence contents, and secrets.
+
 The control plane invokes `scripts/execute.py`; do not call the executor directly during the normal workflow. Direct executor use is reserved for recovery or debugging: inspect its `--help`, preserve the task state, and explain why bypassing the control-plane wrapper is necessary before doing so.
 
 Monitor the command, preserve failure evidence, and report a blocked state promptly. Do not mark a step complete based only on worker narration; require the recorded acceptance checks. Use `resume <task-id>` after the blocking condition is corrected.

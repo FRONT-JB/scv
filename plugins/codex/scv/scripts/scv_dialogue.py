@@ -33,6 +33,22 @@ SCV_PROGRESS_LINES = {
     "unavailable": SCV_STATE_LINES["BLOCKED"],
 }
 
+SCV_STAGE_LINES = {
+    "starting": SCV_STATE_LINES["NEW"],
+    "worker": SCV_STATE_LINES["EXECUTING"],
+    "acceptance": SCV_STATE_LINES["BASE_REVALIDATION"],
+    "verifier": SCV_STATE_LINES["INTAKING"],
+    "failure-analysis": "Come again, Cap'n?",
+    "retry": SCV_STATE_LINES["PLANNING"],
+    "step-complete": SCV_STATE_LINES["READY"],
+    "final-acceptance": SCV_STATE_LINES["BASE_REVALIDATION"],
+    "final-verifier": SCV_STATE_LINES["INTAKING"],
+    "complete": SCV_STATE_LINES["READY"],
+    "blocked": SCV_STATE_LINES["BLOCKED"],
+    "failed": SCV_STATE_LINES["BLOCKED"],
+    "cancelled": SCV_STATE_LINES["ABANDONED"],
+}
+
 
 def _string_value(value: object) -> str | None:
     if isinstance(value, Enum):
@@ -54,6 +70,13 @@ def scv_line_for_progress(status: object) -> str | None:
     return SCV_PROGRESS_LINES.get(value) if value is not None else None
 
 
+def scv_line_for_stage(stage: object) -> str | None:
+    """Return the voice line for a public execution stage."""
+
+    value = _string_value(stage)
+    return SCV_STAGE_LINES.get(value) if value is not None else None
+
+
 def decorate_scv_output(value: Any) -> Any:
     """Add a computed ``scv_line`` without mutating persisted data."""
 
@@ -63,6 +86,8 @@ def decorate_scv_output(value: Any) -> Any:
         return value
     rendered = dict(value)
     line = scv_line_for_state(rendered.get("state"))
+    if line is None:
+        line = scv_line_for_stage(rendered.get("stage"))
     if line is None:
         line = scv_line_for_progress(rendered.get("status"))
     if line is not None:

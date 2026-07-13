@@ -31,6 +31,8 @@ try:  # Support both direct CLI execution and module-based tests.
         load_plan,
         locked_status,
         preflight_start_runtime,
+        read_progress,
+        summarize_execution_progress,
     )
     from .runtime import RuntimeRequirementError, require_macos
     from .learning import LearningError, LearningStore
@@ -47,6 +49,8 @@ except ImportError:  # pragma: no cover - exercised by direct script invocation.
         load_plan,
         locked_status,
         preflight_start_runtime,
+        read_progress,
+        summarize_execution_progress,
     )
     from runtime import RuntimeRequirementError, require_macos
     from learning import LearningError, LearningStore
@@ -364,6 +368,40 @@ def command_start(args: argparse.Namespace, store: TaskStateStore, repo: Path) -
 
 def command_status(args: argparse.Namespace, store: TaskStateStore, repo: Path) -> dict[str, Any]:
     task = store.load(args.task_id)
+    if task.get("target") == "full" and state_name(task) == State.EXECUTING.value:
+        try:
+            plan_metadata = approved_artifact(store, task, "plan", "plan.json")
+            root = Path(task.get("worktree", {}).get("path", ""))
+            if not root.is_dir():
+                raise SCVError(f"기록된 워크트리를 사용할 수 없습니다: {root}")
+            run_dir = (
+                store.task_dir(args.task_id)
+                / "runs"
+                / plan_metadata["sha256"]
+            )
+            if (run_dir / "index.json").is_file():
+                progress = read_progress(
+                    run_dir,
+                    task_id=args.task_id,
+                    plan_sha256=plan_metadata["sha256"],
+                    expected_base_sha=task["base"]["sha"],
+                    workspace=root,
+                )
+            else:
+                plan = load_plan(
+                    artifact_path(store, args.task_id, "plan.json"),
+                    task["base"]["sha"],
+                )
+                progress = {
+                    "status": "pending",
+                    "stage": "starting",
+                    "completed_steps": 0,
+                    "total_steps": len(plan.steps),
+                    "message": "실행 환경을 준비하고 있습니다.",
+                }
+            task["execution_progress"] = decorate_scv_output(progress)
+        except (ExecutorError, OSError, ValueError) as exc:
+            raise SCVError(f"실행 진행 조회에 실패했습니다: {exc}") from exc
     if task.get("target") == "full" and state_name(task) in {
         State.HANDOFF.value,
         State.READY.value,
@@ -382,6 +420,9 @@ def command_status(args: argparse.Namespace, store: TaskStateStore, repo: Path) 
                     execution=execution,
                 )
                 require_execution_index_fingerprint(execution, run_dir)
+                task["execution_progress"] = decorate_scv_output(
+                    summarize_execution_progress(evidence)
+                )
         except ExecutionBusy as exc:
             raise SCVError(
                 "다른 SCV 실행기가 실행 증거를 갱신 중이어서 상태를 확정할 수 없습니다"

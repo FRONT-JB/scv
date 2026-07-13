@@ -74,6 +74,7 @@ MAX_FAILURE_ANALYSIS_CHARS = 30_000
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 2
 EXECUTION_BUSY_EXIT_CODE = 75
 RUN_LOCK_NAME = ".execute.lock"
+MAX_PROGRESS_INDEX_BYTES = 8 * 1024 * 1024
 PLAN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 FULL_GIT_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -81,6 +82,34 @@ GIT_PUSH_PATTERN = re.compile(r"\bgit\b[^;&|\n]*\bpush\b", re.IGNORECASE)
 ACCEPTANCE_PROFILE_NAME = "scv-acceptance"
 SANDBOX_STARTED_MARKER = "__SCV_ACCEPTANCE_SANDBOX_STARTED__"
 SANDBOX_COMMAND_WRAPPER = 'printf "%s\\n" "$1"; exec sh -lc "$2"'
+EXECUTION_STATUSES = frozenset(
+    {
+        "pending",
+        "running",
+        "interrupted",
+        "cancelled",
+        "blocked",
+        "failed",
+        "ready",
+    }
+)
+EXECUTION_PROGRESS_STAGES = frozenset(
+    {
+        "starting",
+        "worker",
+        "acceptance",
+        "verifier",
+        "failure-analysis",
+        "retry",
+        "step-complete",
+        "final-acceptance",
+        "final-verifier",
+        "complete",
+        "blocked",
+        "failed",
+        "cancelled",
+    }
+)
 NESTED_SHELL_EXCLUDES = (
     # Exact names are intentionally used here. They are valid for both the
     # documented glob interpretation and CLI releases that describe these
@@ -693,6 +722,242 @@ def atomic_write_text(path: Path, content: str) -> None:
 def atomic_write_json(path: Path, content: Any) -> None:
     payload = json.dumps(content, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     atomic_write_text(path, payload)
+
+
+def _read_index_snapshot(
+    root: Path, *, max_bytes: int | None = None
+) -> dict[str, Any]:
+    """Read one atomically published index generation without taking its run lock."""
+
+    index_path = root / "index.json"
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(index_path, flags)
+    except OSError as exc:
+        raise StateError(f"{index_path}을(를) 읽을 수 없습니다: {exc}") from exc
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise StateError("실행 인덱스는 일반 파일이어야 합니다")
+        if max_bytes is not None and file_stat.st_size > max_bytes:
+            raise StateError("실행 인덱스가 진행 조회 허용 크기를 초과했습니다")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+        if max_bytes is not None and len(payload) > max_bytes:
+            raise StateError("실행 인덱스가 진행 조회 허용 크기를 초과했습니다")
+    except OSError as exc:
+        raise StateError(f"{index_path}을(를) 읽을 수 없습니다: {exc}") from exc
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StateError(f"{index_path}을(를) 읽을 수 없습니다: {exc}") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise StateError("실행 인덱스의 스키마를 지원하지 않습니다")
+    return value
+
+
+def _inferred_progress(index: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a backward-compatible progress value for an older v1 index."""
+
+    states = index.get("steps")
+    if not isinstance(states, list):
+        raise StateError("실행 인덱스의 단계가 올바르지 않습니다")
+    status = index.get("status")
+    terminal_stages = {
+        "ready": "complete",
+        "blocked": "blocked",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }
+    stage = terminal_stages.get(status, "starting")
+    step_id: str | None = None
+    step_position: int | None = None
+    attempt: int | None = None
+    if status not in terminal_stages:
+        for position, state in enumerate(states, start=1):
+            if not isinstance(state, dict) or state.get("status") == "passed":
+                continue
+            candidate_id = state.get("id")
+            if not isinstance(candidate_id, str):
+                raise StateError("실행 인덱스의 단계 ID가 올바르지 않습니다")
+            step_id = candidate_id
+            step_position = position
+            attempts = state.get("attempts")
+            if isinstance(attempts, list) and attempts:
+                latest = attempts[-1]
+                if isinstance(latest, dict) and isinstance(latest.get("number"), int):
+                    attempt = latest["number"]
+                if state.get("status") == "running":
+                    stage = "worker"
+            break
+        else:
+            if states:
+                stage = "final-acceptance"
+    return {
+        "stage": stage,
+        "step_id": step_id,
+        "step_position": step_position,
+        "total_steps": len(states),
+        "attempt": attempt,
+    }
+
+
+def _validated_progress(
+    index: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    states_value = index.get("steps")
+    if not isinstance(states_value, list) or not states_value or any(
+        not isinstance(state, dict) for state in states_value
+    ):
+        raise StateError("실행 인덱스의 단계가 올바르지 않습니다")
+    states = list(states_value)
+    for state in states:
+        step_id = state.get("id")
+        if not isinstance(step_id, str) or not PLAN_ID_PATTERN.fullmatch(step_id):
+            raise StateError("실행 인덱스의 단계 ID가 올바르지 않습니다")
+        if state.get("status") not in {
+            "pending",
+            "running",
+            "cancelled",
+            "failed",
+            "passed",
+        }:
+            raise StateError(f"{step_id} 단계의 저장된 상태가 올바르지 않습니다")
+
+    progress_value = index.get("progress")
+    progress = (
+        dict(progress_value)
+        if isinstance(progress_value, dict)
+        else _inferred_progress(index)
+    )
+    stage = progress.get("stage")
+    if stage not in EXECUTION_PROGRESS_STAGES:
+        raise StateError("실행 진행 단계가 올바르지 않습니다")
+    terminal_stage = {
+        "ready": "complete",
+        "blocked": "blocked",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }.get(index.get("status"))
+    if terminal_stage is not None and stage != terminal_stage:
+        raise StateError("실행 완료 상태와 진행 단계가 일치하지 않습니다")
+    if terminal_stage is None and stage in {
+        "complete",
+        "blocked",
+        "failed",
+        "cancelled",
+    }:
+        raise StateError("실행 중 상태와 진행 단계가 일치하지 않습니다")
+    total_steps = progress.get("total_steps")
+    if isinstance(total_steps, bool) or total_steps != len(states):
+        raise StateError("실행 진행의 전체 단계 수가 올바르지 않습니다")
+    step_id = progress.get("step_id")
+    step_position = progress.get("step_position")
+    if step_id is None or step_position is None:
+        if step_id is not None or step_position is not None:
+            raise StateError("실행 진행의 현재 단계 연결이 올바르지 않습니다")
+    else:
+        if (
+            not isinstance(step_id, str)
+            or isinstance(step_position, bool)
+            or not isinstance(step_position, int)
+            or not 1 <= step_position <= len(states)
+            or states[step_position - 1].get("id") != step_id
+        ):
+            raise StateError("실행 진행의 현재 단계 연결이 올바르지 않습니다")
+    attempt = progress.get("attempt")
+    if attempt is not None and (
+        isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or not 1 <= attempt <= MAX_ATTEMPTS
+        or step_id is None
+    ):
+        raise StateError("실행 진행의 시도 번호가 올바르지 않습니다")
+    return progress, states
+
+
+def _progress_message(stage: str, step_id: str | None, attempt: int | None) -> str:
+    target = step_id or "현재 단계"
+    attempt_label = f"{attempt}차 " if attempt is not None else ""
+    messages = {
+        "starting": "실행 환경을 준비하고 있습니다.",
+        "worker": f"{target}의 {attempt_label}worker가 구현을 진행하고 있습니다.",
+        "acceptance": f"{target}의 {attempt_label}인수 조건을 검사하고 있습니다.",
+        "verifier": f"{target}의 {attempt_label}결과를 읽기 전용으로 검증하고 있습니다.",
+        "failure-analysis": f"{target}의 {attempt_label}실패 원인을 분석하고 있습니다.",
+        "retry": f"{target}의 {attempt_label}재시도를 준비하고 있습니다.",
+        "step-complete": f"{target} 단계를 완료했습니다.",
+        "final-acceptance": "전체 인수 조건을 다시 검사하고 있습니다.",
+        "final-verifier": "전체 결과를 읽기 전용으로 최종 검증하고 있습니다.",
+        "complete": "모든 실행과 검증을 완료했습니다.",
+        "blocked": "실행 환경 또는 기준 조건 때문에 진행이 차단되었습니다.",
+        "failed": "승인된 실행이 검증을 통과하지 못했습니다.",
+        "cancelled": "실행이 취소되었습니다.",
+    }
+    return messages[stage]
+
+
+def summarize_execution_progress(index: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a bounded, presentation-safe summary of a v1 execution index."""
+
+    if index.get("schema_version") != 1:
+        raise StateError("실행 인덱스의 스키마를 지원하지 않습니다")
+    status = index.get("status")
+    if status not in EXECUTION_STATUSES:
+        raise StateError("실행 인덱스의 status가 올바르지 않습니다")
+    progress, states = _validated_progress(index)
+    completed = sum(state.get("status") == "passed" for state in states)
+    step_id = progress.get("step_id")
+    step_position = progress.get("step_position")
+    summary: dict[str, Any] = {
+        "status": status,
+        "stage": progress["stage"],
+        "completed_steps": completed,
+        "total_steps": len(states),
+    }
+    if isinstance(step_id, str) and isinstance(step_position, int):
+        summary["current_step"] = {
+            "id": step_id,
+            "position": step_position,
+            "total": len(states),
+            "status": states[step_position - 1]["status"],
+        }
+    attempt = progress.get("attempt")
+    if isinstance(attempt, int):
+        summary["attempt"] = attempt
+    summary["message"] = _progress_message(progress["stage"], step_id, attempt)
+    if isinstance(index.get("updated_at"), str):
+        summary["updated_at"] = index["updated_at"]
+    return summary
+
+
+def read_progress(
+    run_dir: Path,
+    *,
+    task_id: str,
+    plan_sha256: str,
+    expected_base_sha: str,
+    workspace: Path,
+) -> dict[str, Any]:
+    """Read sanitized live progress without contending with the executor lock."""
+
+    root = run_dir.resolve()
+    index = _read_index_snapshot(root, max_bytes=MAX_PROGRESS_INDEX_BYTES)
+    bindings = {
+        "task_id": task_id,
+        "plan_sha256": plan_sha256,
+        "expected_base_sha": expected_base_sha,
+        "workspace": str(workspace.resolve()),
+    }
+    if any(index.get(name) != value for name, value in bindings.items()):
+        raise StateError("실행 진행의 태스크·계획·기준·워크트리 연결이 일치하지 않습니다")
+    return summarize_execution_progress(index)
 
 
 @contextmanager
@@ -1400,7 +1665,7 @@ class StepExecutor:
             return self._outcome()
         self.index["status"] = "running"
         self.index.pop("reason", None)
-        self._save_index()
+        self._set_progress("starting")
 
         try:
             self._preflight_runtime()
@@ -1412,7 +1677,7 @@ class StepExecutor:
                     step_state["status"] = "failed"
                     self.index["status"] = "failed"
                     self.index["reason"] = f"{step.id} 단계가 최대 시도 횟수 {MAX_ATTEMPTS}회를 모두 사용했습니다"
-                    self._save_index()
+                    self._set_progress("failed", step=step)
                     return self._outcome()
                 if not self._execute_step(step, step_state):
                     return self._outcome()
@@ -1421,17 +1686,17 @@ class StepExecutor:
         except CommandCancelled:
             self.index["status"] = "cancelled"
             self.index["reason"] = "실행이 취소되었습니다"
-            self._save_index()
+            self._set_progress("cancelled")
             raise
         except BaseMismatchError as exc:
             self.index["status"] = "blocked"
             self.index["reason"] = str(exc)
-            self._save_index()
+            self._set_progress("blocked")
             raise
         except InfrastructureBlocker as exc:
             self.index["status"] = "blocked"
             self.index["reason"] = f"실행 환경이 준비되지 않았습니다: {exc}"
-            self._save_index()
+            self._set_progress("blocked")
             return self._outcome()
 
     def _preflight_runtime(self) -> None:
@@ -1583,6 +1848,7 @@ class StepExecutor:
         commands = tuple(
             command for step in self.plan.steps for command in step.acceptance
         ) + self.plan.final_acceptance
+        self._set_progress("final-acceptance")
         passed, failure = self._run_acceptance(
             commands,
             final_dir,
@@ -1603,7 +1869,7 @@ class StepExecutor:
             self.index["status"] = "failed"
             self.index["reason"] = failure or "최종 인수 검증에 실패했습니다"
             self._seal_final_evidence(final_dir)
-            self._save_index()
+            self._set_progress("failed")
             return self._outcome()
 
         final_step = Step(
@@ -1621,6 +1887,7 @@ class StepExecutor:
             "risks": [],
         }
         try:
+            self._set_progress("final-verifier")
             verifier = self._run_verifier(
                 final_step,
                 final_dir,
@@ -1632,7 +1899,7 @@ class StepExecutor:
             self.index["status"] = "failed"
             self.index["reason"] = str(exc)
             self._seal_final_evidence(final_dir)
-            self._save_index()
+            self._set_progress("failed")
             return self._outcome()
         self.index["final_verifier"] = verifier
         if verifier["verdict"] != "pass":
@@ -1641,7 +1908,7 @@ class StepExecutor:
             self.index["status"] = "failed"
             self.index["reason"] = findings or verifier["summary"]
             self._seal_final_evidence(final_dir)
-            self._save_index()
+            self._set_progress("failed")
             return self._outcome()
 
         self._assert_frozen_base()
@@ -1667,7 +1934,7 @@ class StepExecutor:
         self.index["final_validation"]["status"] = "passed"
         self.index["status"] = "ready"
         self.index["completed_at"] = _utc_now()
-        self._save_index()
+        self._set_progress("complete")
         return self._outcome()
 
     def _seal_final_evidence(self, final_dir: Path) -> str:
@@ -1742,6 +2009,13 @@ class StepExecutor:
                 "updated_at": now,
                 "completed_at": None,
                 "final_acceptance": None,
+                "progress": {
+                    "stage": "starting",
+                    "step_id": None,
+                    "step_position": None,
+                    "total_steps": len(self.plan.steps),
+                    "attempt": None,
+                },
                 "steps": [
                     {
                         "id": step.id,
@@ -1788,17 +2062,10 @@ class StepExecutor:
         frozen_base = index.get("expected_base_sha")
         if not isinstance(frozen_base, str) or not FULL_GIT_SHA_PATTERN.fullmatch(frozen_base):
             raise StateError("실행 인덱스의 expected_base_sha가 올바르지 않습니다")
-        if index.get("status") not in {
-            "pending",
-            "running",
-            "interrupted",
-            "cancelled",
-            "blocked",
-            "failed",
-            "ready",
-        }:
+        if index.get("status") not in EXECUTION_STATUSES:
             raise StateError("실행 인덱스의 status가 올바르지 않습니다")
         changed = False
+        _validated_progress(index)
         for state in states:
             step_id = state.get("id")
             if state.get("status") not in {
@@ -1973,6 +2240,42 @@ class StepExecutor:
             self._save_index()
         return index
 
+    def _set_progress(
+        self,
+        stage: str,
+        *,
+        step: Step | None = None,
+        attempt_number: int | None = None,
+    ) -> None:
+        """Persist the controller-owned public stage before starting that work."""
+
+        if stage not in EXECUTION_PROGRESS_STAGES:
+            raise StateError(f"지원하지 않는 실행 진행 단계입니다: {stage}")
+        step_position: int | None = None
+        step_id: str | None = None
+        if step is not None:
+            step_id = step.id
+            step_position = next(
+                (
+                    position
+                    for position, candidate in enumerate(self.plan.steps, start=1)
+                    if candidate.id == step.id
+                ),
+                None,
+            )
+            if step_position is None:
+                raise StateError(f"계획에서 실행 진행 단계 {step.id}을(를) 찾을 수 없습니다")
+        if attempt_number is not None and step is None:
+            raise StateError("시도 번호가 있는 실행 진행에는 단계가 필요합니다")
+        self.index["progress"] = {
+            "stage": stage,
+            "step_id": step_id,
+            "step_position": step_position,
+            "total_steps": len(self.plan.steps),
+            "attempt": attempt_number,
+        }
+        self._save_index()
+
     def _save_index(self) -> None:
         if not self.index:
             return
@@ -1981,8 +2284,12 @@ class StepExecutor:
 
     def _execute_step(self, step: Step, step_state: dict[str, Any]) -> bool:
         while len(step_state["attempts"]) < MAX_ATTEMPTS:
-            self._assert_frozen_base()
             attempt_number = len(step_state["attempts"]) + 1
+            if attempt_number > 1:
+                self._set_progress(
+                    "retry", step=step, attempt_number=attempt_number
+                )
+            self._assert_frozen_base()
             blocker_count = len(step_state.get("blockers", []))
             evidence_name = f"attempt-{attempt_number}"
             if blocker_count:
@@ -2009,12 +2316,17 @@ class StepExecutor:
                     "status": "launched",
                     "launched_at": _utc_now(),
                 }
-                self._save_index()
+                self._set_progress(
+                    "worker", step=step, attempt_number=attempt_number
+                )
                 worker_output = self._run_worker(
                     step, attempt_number, attempt_dir, previous_failure
                 )
                 self._assert_frozen_base()
                 timeout = step.timeout_seconds or self.timeout_seconds
+                self._set_progress(
+                    "acceptance", step=step, attempt_number=attempt_number
+                )
                 accepted, acceptance_failure = self._run_acceptance(
                     step.acceptance, attempt_dir, timeout
                 )
@@ -2031,6 +2343,9 @@ class StepExecutor:
                         acceptance_failure or "인수 검증 명령이 실패했습니다",
                         status=acceptance_status,
                     )
+                self._set_progress(
+                    "verifier", step=step, attempt_number=attempt_number
+                )
                 verifier_output = self._run_verifier(
                     step, attempt_dir, worker_output, timeout
                 )
@@ -2081,8 +2396,13 @@ class StepExecutor:
                     self.index["reason"] = (
                         f"{step.id} 단계가 최대 시도 횟수 {MAX_ATTEMPTS}회를 모두 사용했습니다: {failure}"
                     )
-                    self._save_index()
+                    self._set_progress(
+                        "failed", step=step, attempt_number=attempt_number
+                    )
                     return False
+                self._set_progress(
+                    "retry", step=step, attempt_number=attempt_number + 1
+                )
                 continue
 
             try:
@@ -2098,7 +2418,9 @@ class StepExecutor:
             step_state["status"] = "passed"
             # 먼저 제어기가 확인한 성공을 영속화합니다. 선택 기능인 학습 저장소
             # 장애가 이미 통과한 구현 시도를 running 상태로 되돌릴 수 없습니다.
-            self._save_index()
+            self._set_progress(
+                "step-complete", step=step, attempt_number=attempt_number
+            )
             self._record_successful_learning(attempt, step_state)
             self._save_index()
             return True
@@ -2265,6 +2587,9 @@ class StepExecutor:
             }
         ):
             return
+        self._set_progress(
+            "failure-analysis", step=step, attempt_number=attempt_number
+        )
         evidence_sha256 = attempt.get("evidence_sha256")
         if not isinstance(evidence_sha256, str) or not SHA256_PATTERN.fullmatch(
             evidence_sha256
@@ -3305,22 +3630,8 @@ def execute_plan(
 def _read_status_unlocked(root: Path) -> dict[str, Any]:
     """Read and validate a run while the caller owns its directory lock."""
 
-    index_path = root / "index.json"
-    try:
-        value = json.loads(index_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise StateError(f"{index_path}을(를) 읽을 수 없습니다: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
-        raise StateError("실행 인덱스의 스키마를 지원하지 않습니다")
-    if value.get("status") not in {
-        "pending",
-        "running",
-        "interrupted",
-        "cancelled",
-        "blocked",
-        "failed",
-        "ready",
-    }:
+    value = _read_index_snapshot(root)
+    if value.get("status") not in EXECUTION_STATUSES:
         raise StateError("실행 인덱스의 status가 올바르지 않습니다")
     validate_persisted_evidence(value, root)
     return value
