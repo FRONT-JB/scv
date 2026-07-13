@@ -1,5 +1,7 @@
 # SCV
 
+![SCV construction utility units cycling through Scope, Construct, Verify, and Improve](docs/assets/scv-readme-banner.png)
+
 > **S**cope → **C**onstruct → **V**erify. SCV good to go.
 
 SCV는 요구사항을 계획하고, 격리된 작업 공간에서 구현하고, 검증 결과를
