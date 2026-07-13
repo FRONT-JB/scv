@@ -44,6 +44,35 @@ Improve    실패 분석 → 제한된 재시도 → lesson 후보/개선 제안
 
 문구는 원작 [StarCraft SCV 음성 대사](https://starcraft.fandom.com/wiki/StarCraft_unit_quotations#SCV)를 사용한다.
 
+실행 중 메인 세션은 장기 `execute` 프로세스를 그대로 유지하면서 별도 `status`
+호출로 15–30초마다 변경된 `execution_progress`만 확인한다. 두 번째 `execute`를
+시작하지 않으며 다음처럼 보고한다, sir.
+
+```text
+EXECUTING — "Orders received." — step 1/2, worker, attempt 1, sir.
+EXECUTING — "Come again, Cap'n?" — step 1/2, failure-analysis, attempt 1, sir.
+EXECUTING — "SCV good to go, sir." — step 1/2, retry, attempt 2, sir.
+```
+
+| 실행 단계 | 진행 과정 | `scv_line` |
+| --- | --- | --- |
+| `starting` | 실행 환경 준비 | `Reportin' for duty.` |
+| `worker` | 단계 구현 | `Orders received.` |
+| `acceptance` | 단계 인수 검사 | `Affirmative.` |
+| `verifier` | 단계 읽기 전용 검증 | `I read you.` |
+| `failure-analysis` | 실패 증거 분석 | `Come again, Cap'n?` |
+| `retry` | 제한 재시도 준비 | `SCV good to go, sir.` |
+| `step-complete` | 단계 완료 | `Job's finished.` |
+| `final-acceptance` | 전체 인수 검사 | `Affirmative.` |
+| `final-verifier` | 전체 읽기 전용 검증 | `I read you.` |
+| `complete` | 실행 증거 완료 | `Job's finished.` |
+| `blocked` / `failed` | 차단 또는 실패 | `I can't build there.` |
+| `cancelled` | 실행 취소 | `I'm not readin' you clearly.` |
+
+진행 스냅샷은 단계·시도·완료 개수만 공개하며 프롬프트, 원시 출력, 증거 본문,
+환경값은 노출하지 않는다. 원자적으로 교체된 인덱스를 읽으므로 실행기 잠금도
+방해하지 않는다.
+
 `$scv:workflow`는 다음 종료 목표를 지원한다.
 
 - `analyze`: 스펙 승인까지 진행하고 브랜치나 worktree를 만들지 않는다.
@@ -113,6 +142,9 @@ Improve    실패 분석 → 제한된 재시도 → lesson 후보/개선 제안
     │   ├── scv_dialogue.py
     │   └── workspace.py
     └── tests/
+        ├── e2e/
+        │   ├── __init__.py
+        │   └── test_workflow_live.py
         ├── test_dialogue.py
         ├── test_execute.py
         ├── test_learning.py
@@ -165,4 +197,15 @@ python3 -m json.tool plugins/codex/scv/.codex-plugin/plugin.json
 git diff --check
 ```
 
+실제 Codex Worker·Failure Analyst·Verifier와 sandbox 인수 검증을 포함한 Live
+E2E는 유효한 Codex 인증과 네트워크가 있는 macOS 호스트에서 명시적으로 실행한다.
+정상 완료뿐 아니라 실제 인수 실패, 분석 증거 봉인, 2차 Worker 재시도도 검증한다.
+
+```bash
+SCV_LIVE_E2E=1 python3 -m unittest discover \
+  -s plugins/codex/scv/tests/e2e -p 'test_workflow_live.py' -v
+```
+
+기본 테스트에서는 Live E2E를 건너뛴다. 결정적 테스트는 각 공개 진행 단계,
+잠금 중 조회, 재시도, 차단·취소, 구버전 v1 인덱스 호환과 증거 무결성을 다룬다.
 GitHub Actions는 macOS에서 Python 3.9와 최신 Python 3.x 조합을 검증한다.

@@ -17,6 +17,7 @@ SCV는 macOS에서 요구사항 정리부터 구현 계획 승인, 격리 워크
 - 이 격리는 열거한 자격증명과 전달 환경을 보호하는 경계다. macOS 사용자 홈에 설치된 Node·pnpm 같은 개발 도구의 동작을 유지하기 위해 전역 홈 읽기 차단은 사용하지 않으므로, 목록 밖의 일반 사용자 파일 절대 경로까지 모두 숨기지는 않는다.
 - 같은 태스크를 여러 세션이 다뤄도 상태 잠금, 제어기 실행 임대, 실행기 잠금으로 상태 갱신 유실과 증거 충돌을 막는다.
 - 상태와 실행 진행 출력에는 실제 SCV 대사를 `scv_line`으로 덧붙인다. 대사는 표시 전용이며 기존 상태값과 종료 코드가 계속 권위 있는 계약이다.
+- 실행 중 `status`는 단계·시도·완료 개수만 담은 `execution_progress`를 반환한다. 프롬프트, 원시 출력, 증거 본문, 환경값은 반환하지 않으며 실행기 잠금을 방해하지 않는다.
 - 타임아웃을 제외한 구현·인수·검증 실패에는 별도의 읽기 전용 Failure Analyst를 한 번 호출하고, 정제된 분석만 다음 worker 재시도에 전달한다. 타임아웃은 원래 태스크의 제한된 재시도·증거로만 남긴다.
 - 성공한 재시도의 교훈은 `candidate`로만 저장한다. 최종 실행 증거와 명시적 승인을 거친 `active` lesson만 같은 실패 signature에 재사용한다.
 - 실행 중인 SCV는 자기 코드를 수정하지 않는다. 독립 분석이 제어기 결함으로 판정한 경우에만 개선 제안을 남기고 별도 소스 worktree 작업으로 넘긴다. 일반 구현 소진·타임아웃·환경 실패는 원래 태스크에서 처리한다.
@@ -44,6 +45,9 @@ plugins/codex/scv/
 │   ├── scv_dialogue.py
 │   └── workspace.py
 └── tests/
+    ├── e2e/
+    │   ├── __init__.py
+    │   └── test_workflow_live.py
     ├── test_dialogue.py
     ├── test_execute.py
     ├── test_learning.py
@@ -73,3 +77,44 @@ $scv:improve 태스크 20260713-example에서 생성된 실패 학습 후보를 
 ```
 
 필수 런타임은 macOS, Git, Python 3.9 이상, Codex CLI 0.144.1 이상, POSIX `sh`다. Linux, WSL, Windows에서는 태스크나 실행 상태를 만들기 전에 한글 오류로 중단한다. `start full`, 완료된 `plan`의 `full` 승격, `materialize`, `execute`는 중첩 Codex·Seatbelt 경계를 소유하므로 관리형 Codex 세션에서 호스트 실행 승인을 받아 호출한다. 이 승인은 바깥 제어기 명령에만 적용되며 내부 worker·analyst·verifier·인수 검증 샌드박스의 권한은 넓히지 않는다. 자세한 단계와 상태 전이는 [workflow-contract.md](skills/workflow/references/workflow-contract.md)를 참고한다.
+
+## 실행 진행 조회
+
+메인 세션은 `execute`를 하나의 장기 exec 세션으로 유지하고, 별도 읽기 전용
+`status` 호출로 15–30초마다 변경된 진행만 확인한다. 두 번째 `execute`를 시작하지
+않으며 다음처럼 보고한다, sir.
+
+```text
+EXECUTING — "Orders received." — step 1/2, worker, attempt 1, sir.
+EXECUTING — "Come again, Cap'n?" — step 1/2, failure-analysis, attempt 1, sir.
+EXECUTING — "SCV good to go, sir." — step 1/2, retry, attempt 2, sir.
+```
+
+| `execution_progress.stage` | 의미 | `scv_line` |
+| --- | --- | --- |
+| `starting` | 실행 환경 준비 | `Reportin' for duty.` |
+| `worker` | 단계 구현 | `Orders received.` |
+| `acceptance` | 단계 인수 검사 | `Affirmative.` |
+| `verifier` | 단계 읽기 전용 검증 | `I read you.` |
+| `failure-analysis` | 실패 증거 분석 | `Come again, Cap'n?` |
+| `retry` | 다음 제한 재시도 준비 | `SCV good to go, sir.` |
+| `step-complete` | 단계 완료 | `Job's finished.` |
+| `final-acceptance` | 전체 인수 검사 | `Affirmative.` |
+| `final-verifier` | 전체 읽기 전용 검증 | `I read you.` |
+| `complete` | 실행 증거 완료 | `Job's finished.` |
+| `blocked` / `failed` | 차단 또는 실패 | `I can't build there.` |
+| `cancelled` | 실행 취소 | `I'm not readin' you clearly.` |
+
+## 검증
+
+기본 테스트는 실제 Codex 호출 없이 각 진행 단계, 잠금 중 상태 조회, 재시도,
+차단·취소, 증거 무결성을 결정적으로 검증한다. Live E2E는 명시적으로 활성화할
+때만 임시 Git 저장소에서 실제 Worker·Failure Analyst·Verifier·sandbox·handoff와
+실패 후 재시도를 검증한다.
+
+```bash
+python3 -m unittest discover -s plugins/codex/scv/tests -p 'test_*.py' -v
+
+SCV_LIVE_E2E=1 python3 -m unittest discover \
+  -s plugins/codex/scv/tests/e2e -p 'test_workflow_live.py' -v
+```
