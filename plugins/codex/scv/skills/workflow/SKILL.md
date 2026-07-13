@@ -32,6 +32,13 @@ python3 "<plugin-root>/scripts/scv.py" --repo "<repo>" start <target> --task-id 
 
 For an existing task, run `status <task-id>` first. If it is paused, use `resume <task-id>` and continue from the returned state; do not replay completed stages. When `status` shows a `READY` `plan` target, run the promoting `resume` as a host-approved command because it performs the full-runtime Seatbelt preflight before changing the durable target.
 
+Every control-plane result containing a lifecycle `state` also contains a computed
+`scv_line`. When reporting state or progress, show it once as
+`STATE — "<scv_line>"`, followed by the Korean explanation and next action. Treat
+the line as presentation only: state values, command exit codes, approvals, and
+recorded evidence remain authoritative. Never infer approval or recovery from a
+voice line.
+
 ## Run the Pipeline
 
 ### 1. Intake and specification

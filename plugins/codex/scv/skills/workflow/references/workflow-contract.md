@@ -22,6 +22,7 @@ Use this contract as the authoritative model for task state, gates, and artifact
 16. Run only on macOS and reject unsupported hosts before creating or mutating task or run state.
 17. Freeze actionable failure evidence before launching a read-only Failure Analyst, and store analyst evidence under a separately hashed path.
 18. Keep cross-task learning human-gated: create candidates after a verified retry, inject only active exact-signature lessons, and route SCV defects to proposal-only improvement work.
+19. Add the mapped SCV voice line only at CLI output boundaries. Never persist `scv_line`, use it for state transitions, or treat it as stronger evidence than `state`, `status`, exit codes, and verified artifacts.
 
 ## Targets
 
@@ -54,6 +55,11 @@ An `analyze` task may be resumed into `plan`, and a `plan` task may be resumed i
 | nonterminal state | confirmed `abandon TASK_ID` | `ABANDONED` |
 
 Reject out-of-order commands. Approval transitions require an already submitted artifact and an explicit user approval to the exact artifact revision. Replacing an artifact invalidates its previous approval.
+
+Public control-plane JSON for a task includes a computed `scv_line`. Human-facing
+progress reports render it as `STATE — "<scv_line>"`; machines must continue to
+branch on the lifecycle state and exit code. Executor status output applies the
+same presentation rule to `pending`, `running`, `ready`, and failure statuses.
 
 ## Control-plane commands
 

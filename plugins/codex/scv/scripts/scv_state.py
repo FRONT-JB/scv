@@ -30,9 +30,11 @@ except ImportError:  # pragma: no cover - macOS 전용 오류를 먼저 표시�
 try:
     from .cli_ko import localize_argparse
     from .runtime import RuntimeRequirementError, require_macos
+    from .scv_dialogue import decorate_scv_output
 except ImportError:  # pragma: no cover - direct script execution.
     from cli_ko import localize_argparse
     from runtime import RuntimeRequirementError, require_macos
+    from scv_dialogue import decorate_scv_output
 
 
 SCHEMA_VERSION = 1
@@ -908,7 +910,14 @@ class TaskStateStore:
 
 
 def _json_print(value: Any) -> None:
-    print(json.dumps(value, indent=2, sort_keys=True, allow_nan=False))
+    print(
+        json.dumps(
+            decorate_scv_output(value),
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:

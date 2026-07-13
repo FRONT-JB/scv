@@ -34,6 +34,7 @@ try:  # Support both direct CLI execution and module-based tests.
     )
     from .runtime import RuntimeRequirementError, require_macos
     from .learning import LearningError, LearningStore
+    from .scv_dialogue import decorate_scv_output
     from .workspace import workspace_fingerprint
 except ImportError:  # pragma: no cover - exercised by direct script invocation.
     from scv_state import SCVStateError, State, TaskStateStore
@@ -49,6 +50,7 @@ except ImportError:  # pragma: no cover - exercised by direct script invocation.
     )
     from runtime import RuntimeRequirementError, require_macos
     from learning import LearningError, LearningStore
+    from scv_dialogue import decorate_scv_output
     from workspace import workspace_fingerprint
 
 
@@ -131,7 +133,14 @@ def state_name(task: dict[str, Any]) -> str:
 
 
 def emit(value: Any) -> None:
-    print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            decorate_scv_output(value),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:

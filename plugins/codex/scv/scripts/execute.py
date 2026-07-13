@@ -46,6 +46,7 @@ try:
         require_macos,
         validate_codex_capabilities,
     )
+    from .scv_dialogue import decorate_scv_output
     from .workspace import workspace_fingerprint
 except ImportError:  # pragma: no cover - direct script execution.
     from cli_ko import localize_argparse
@@ -61,6 +62,7 @@ except ImportError:  # pragma: no cover - direct script execution.
         require_macos,
         validate_codex_capabilities,
     )
+    from scv_dialogue import decorate_scv_output
     from workspace import workspace_fingerprint
 
 
@@ -3401,7 +3403,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise InfrastructureBlocker(str(exc)) from exc
         if arguments.status:
             status = read_status(arguments.run_dir)
-            print(json.dumps(status, ensure_ascii=False, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    decorate_scv_output(status),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
             return 0 if status.get("status") == "ready" else 1
         if arguments.plan is None or arguments.root is None:
             parser.error("--status를 사용하지 않을 때는 계획 파일과 --root가 필요합니다")
@@ -3417,12 +3426,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(
             json.dumps(
-                {
-                    "status": outcome.status,
-                    "index": str(outcome.index_path),
-                    "completed_steps": outcome.completed_steps,
-                    "total_steps": outcome.total_steps,
-                },
+                decorate_scv_output(
+                    {
+                        "status": outcome.status,
+                        "index": str(outcome.index_path),
+                        "completed_steps": outcome.completed_steps,
+                        "total_steps": outcome.total_steps,
+                    }
+                ),
                 ensure_ascii=False,
                 sort_keys=True,
             )

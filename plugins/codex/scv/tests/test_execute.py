@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -2043,7 +2043,9 @@ class CliStatusTest(unittest.TestCase):
             with redirect_stdout(output):
                 exit_code = execute.main(["--status", "--run-dir", str(run_dir)])
         self.assertEqual(exit_code, 0)
-        self.assertEqual(json.loads(output.getvalue())["status"], "ready")
+        rendered = json.loads(output.getvalue())
+        self.assertEqual(rendered["status"], "ready")
+        self.assertEqual(rendered["scv_line"], "Job's finished.")
 
     @unittest.skipUnless(os.name == "posix", "POSIX 파일 잠금 동작을 검증합니다")
     def test_status_cli_returns_75_when_run_is_locked_without_mutation(self) -> None:
@@ -2101,7 +2103,9 @@ class CliStatusTest(unittest.TestCase):
             revalidate_ready=False,
             learning_root=None,
         )
-        self.assertEqual(json.loads(output.getvalue())["status"], "ready")
+        rendered = json.loads(output.getvalue())
+        self.assertEqual(rendered["status"], "ready")
+        self.assertEqual(rendered["scv_line"], "Job's finished.")
 
     def test_run_cli_returns_130_for_cancellation(self) -> None:
         with mock.patch.object(

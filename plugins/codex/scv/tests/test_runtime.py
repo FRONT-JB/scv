@@ -3,11 +3,19 @@ from __future__ import annotations
 import io
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from plugins.codex.scv.scripts import scv, execute, runtime
+
+SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import execute  # noqa: E402
+import runtime  # noqa: E402
+import scv  # noqa: E402
 
 
 class RuntimeRequirementTests(unittest.TestCase):

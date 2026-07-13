@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -672,7 +672,9 @@ class TaskStateStoreTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(result, 0)
-        self.assertEqual(json.loads(stdout.getvalue())["task_id"], "cli-task")
+        rendered = json.loads(stdout.getvalue())
+        self.assertEqual(rendered["task_id"], "cli-task")
+        self.assertEqual(rendered["scv_line"], "Reportin' for duty.")
 
         stderr = io.StringIO()
         with redirect_stderr(stderr):

@@ -4,11 +4,18 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from plugins.codex.scv.scripts import learning, runtime
+
+SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import learning  # noqa: E402
+import runtime  # noqa: E402
 
 
 def _record_observation_process(

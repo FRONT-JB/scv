@@ -8,12 +8,21 @@ import os
 from contextlib import redirect_stderr
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from plugins.codex.scv.scripts import scv, execute, improve, learning
-from plugins.codex.scv.scripts.scv_state import State, TaskStateStore
+
+SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import execute  # noqa: E402
+import improve  # noqa: E402
+import learning  # noqa: E402
+import scv  # noqa: E402
+from scv_state import State, TaskStateStore  # noqa: E402
 
 
 class SCVControlPlaneTests(unittest.TestCase):
