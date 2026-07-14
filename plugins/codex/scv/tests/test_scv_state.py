@@ -672,8 +672,11 @@ class TaskStateStoreTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(result, 0)
+        self.assertIn('"state_label": "태스크 초기화"', stdout.getvalue())
         rendered = json.loads(stdout.getvalue())
         self.assertEqual(rendered["task_id"], "cli-task")
+        self.assertEqual(rendered["state"], State.NEW.value)
+        self.assertEqual(rendered["state_label"], "태스크 초기화")
         self.assertEqual(rendered["scv_line"], "Reportin' for duty.")
 
         stderr = io.StringIO()

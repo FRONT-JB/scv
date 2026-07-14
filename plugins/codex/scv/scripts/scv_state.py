@@ -913,6 +913,7 @@ def _json_print(value: Any) -> None:
     print(
         json.dumps(
             decorate_scv_output(value),
+            ensure_ascii=False,
             indent=2,
             sort_keys=True,
             allow_nan=False,

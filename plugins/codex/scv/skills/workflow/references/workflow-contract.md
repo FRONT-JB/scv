@@ -56,10 +56,12 @@ An `analyze` task may be resumed into `plan`, and a `plan` task may be resumed i
 
 Reject out-of-order commands. Approval transitions require an already submitted artifact and an explicit user approval to the exact artifact revision. Replacing an artifact invalidates its previous approval.
 
-Public control-plane JSON for a task includes a computed `scv_line`. Human-facing
-progress reports render it as `STATE — "<scv_line>"`; machines must continue to
-branch on the lifecycle state and exit code. Executor status output applies the
-same presentation rule to `pending`, `running`, `ready`, and failure statuses.
+Public control-plane JSON for a task includes computed `state_label` and
+`scv_line` fields. Human-facing progress reports render them as
+`<state_label> — "<scv_line>"` and do not expose the raw English state code as a
+heading. Machines must continue to branch on the lifecycle `state` and exit code.
+Executor status output applies the same presentation rule to `pending`,
+`running`, `ready`, and failure statuses.
 
 While a full task is `EXECUTING`, `status TASK_ID` also returns a sanitized
 `execution_progress` object. It contains only `status`, `stage`, completed and

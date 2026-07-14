@@ -23,11 +23,12 @@ Improve    실패 분석 → 제한된 재시도 → lesson 후보/개선 제안
 
 ## 상태별 SCV 대사
 
-제어기와 실행기의 JSON 출력에는 현재 상태를 설명하는 `scv_line`이 함께 표시된다.
-대사는 진행 상황을 빠르게 알아보기 위한 표현 계층이며, 자동화에서는 기존 `state`,
-`status`, 종료 코드를 계속 기준으로 사용한다. `scv_line`은 상태 파일에 저장하지 않는다.
+제어기와 실행기의 JSON 출력에는 한글 `state_label`·`stage_label`과 현재 상태를
+설명하는 `scv_line`이 함께 표시된다. 사용자에게는 한글 라벨을 표시하고,
+자동화에서는 기존 `state`, `stage`, `status`, 종료 코드를 계속 기준으로 사용한다.
+라벨과 `scv_line`은 상태 파일에 저장하지 않는다.
 
-| 상태 | 진행 과정 | `scv_line` |
+| `state` | `state_label` | `scv_line` |
 | --- | --- | --- |
 | `NEW` | 태스크 초기화 | `Reportin' for duty.` |
 | `INTAKING` | 요구사항 접수 | `I read you.` |
@@ -36,38 +37,38 @@ Improve    실패 분석 → 제한된 재시도 → lesson 후보/개선 제안
 | `AWAITING_PLAN_APPROVAL` | 계획 승인 대기 | `Yes sir?` |
 | `BASE_REVALIDATION` | 승인 기준 재확인 | `Affirmative.` |
 | `MATERIALIZING_WORKTREE` | 격리 워크트리 생성 | `Right away sir.` |
-| `EXECUTING` | 승인 계획 실행 | `Orders received.` |
+| `EXECUTING` | 실행 중 | `Orders received.` |
 | `HANDOFF` | 검증 결과 인계 | `Roger that.` |
-| `READY` | 완료 및 인계 준비 | `Job's finished.` |
-| `BLOCKED` | 복구 가능한 차단 | `I can't build there.` |
-| `ABANDONED` | 명시적 포기 | `I'm not readin' you clearly.` |
+| `READY` | 인계 준비 완료 | `Job's finished.` |
+| `BLOCKED` | 차단됨 | `I can't build there.` |
+| `ABANDONED` | 포기됨 | `I'm not readin' you clearly.` |
 
 문구는 원작 [StarCraft SCV 음성 대사](https://starcraft.fandom.com/wiki/StarCraft_unit_quotations#SCV)를 사용한다.
 
 실행 중 메인 세션은 장기 `execute` 프로세스를 그대로 유지하면서 별도 `status`
 호출로 15–30초마다 변경된 `execution_progress`만 확인한다. 두 번째 `execute`를
-시작하지 않으며 다음처럼 보고한다, sir.
+시작하지 않으며 다음처럼 보고한다.
 
 ```text
-EXECUTING — "Orders received." — step 1/2, worker, attempt 1, sir.
-EXECUTING — "Come again, Cap'n?" — step 1/2, failure-analysis, attempt 1, sir.
-EXECUTING — "SCV good to go, sir." — step 1/2, retry, attempt 2, sir.
+실행 중 — "Orders received." — 단계 1/2, 단계 구현, 1차 시도.
+실행 중 — "Come again, Cap'n?" — 단계 1/2, 실패 증거 분석, 1차 시도.
+실행 중 — "SCV good to go, sir." — 단계 1/2, 재시도 준비, 2차 시도.
 ```
 
-| 실행 단계 | 진행 과정 | `scv_line` |
+| `stage` | `stage_label` | `scv_line` |
 | --- | --- | --- |
 | `starting` | 실행 환경 준비 | `Reportin' for duty.` |
 | `worker` | 단계 구현 | `Orders received.` |
 | `acceptance` | 단계 인수 검사 | `Affirmative.` |
 | `verifier` | 단계 읽기 전용 검증 | `I read you.` |
 | `failure-analysis` | 실패 증거 분석 | `Come again, Cap'n?` |
-| `retry` | 제한 재시도 준비 | `SCV good to go, sir.` |
+| `retry` | 재시도 준비 | `SCV good to go, sir.` |
 | `step-complete` | 단계 완료 | `Job's finished.` |
 | `final-acceptance` | 전체 인수 검사 | `Affirmative.` |
 | `final-verifier` | 전체 읽기 전용 검증 | `I read you.` |
-| `complete` | 실행 증거 완료 | `Job's finished.` |
-| `blocked` / `failed` | 차단 또는 실패 | `I can't build there.` |
-| `cancelled` | 실행 취소 | `I'm not readin' you clearly.` |
+| `complete` | 실행 완료 | `Job's finished.` |
+| `blocked` / `failed` | 차단됨 / 실패 | `I can't build there.` |
+| `cancelled` | 취소됨 | `I'm not readin' you clearly.` |
 
 진행 스냅샷은 단계·시도·완료 개수만 공개하며 프롬프트, 원시 출력, 증거 본문,
 환경값은 노출하지 않는다. 원자적으로 교체된 인덱스를 읽으므로 실행기 잠금도
@@ -138,6 +139,7 @@ EXECUTING — "SCV good to go, sir." — step 1/2, retry, attempt 2, sir.
     │   ├── execute.py
     │   ├── improve.py
     │   ├── learning.py
+    │   ├── cli_ko.py
     │   ├── runtime.py
     │   ├── scv_dialogue.py
     │   └── workspace.py
@@ -158,7 +160,9 @@ EXECUTING — "SCV good to go, sir." — step 1/2, retry, attempt 2, sir.
 - `execute.py`: 승인된 계획 실행과 단계별·최종 검증 증거 수집
 - `learning.py`: 실패 관찰, lesson, 개선 제안 저장 및 무결성 검증
 - `improve.py`: 검증된 증거를 기반으로 한 사람 승인형 학습 관리
+- `cli_ko.py`: 각 명령의 `argparse` 도움말과 오류 접두사를 한글로 통일
 - `runtime.py`: 지원 운영체제와 필수 런타임 검사
+- `scv_dialogue.py`: 상태·진행 결과에 표시 전용 한글 라벨과 SCV 대사를 결정적으로 부가
 - `workspace.py`: worktree 상태 지문 계산과 실행·인계 간 동일성 검증
 
 ## 설치

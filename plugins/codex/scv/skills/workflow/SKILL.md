@@ -32,10 +32,12 @@ python3 "<plugin-root>/scripts/scv.py" --repo "<repo>" start <target> --task-id 
 
 For an existing task, run `status <task-id>` first. If it is paused, use `resume <task-id>` and continue from the returned state; do not replay completed stages. When `status` shows a `READY` `plan` target, run the promoting `resume` as a host-approved command because it performs the full-runtime Seatbelt preflight before changing the durable target.
 
-Every control-plane result containing a lifecycle `state` also contains a computed
-`scv_line`. When reporting state or progress, show it once as
-`STATE — "<scv_line>"`, followed by the Korean explanation and next action. Treat
-the line as presentation only: state values, command exit codes, approvals, and
+Every control-plane result containing a lifecycle `state` also contains computed
+`state_label` and `scv_line` fields. When reporting state or progress, show it
+once as `<state_label> — "<scv_line>"`, followed by the Korean explanation and
+next action. Never expose the raw English state code as the conversational
+heading; it is the machine-readable control value only. Treat both presentation
+fields as non-authoritative: state values, command exit codes, approvals, and
 recorded evidence remain authoritative. Never infer approval or recovery from a
 voice line.
 
@@ -88,7 +90,7 @@ handle until it exits. While it is running, invoke the read-only `status <task-i
 command separately every 15–30 seconds. `status` reads an atomically published,
 sanitized snapshot and does not contend with the executor's run lock. Report only
 changed `execution_progress` values as
-`EXECUTING — "<execution_progress.scv_line>" — step X/Y, <stage>, attempt N, sir.`
+`<state_label> — "<execution_progress.scv_line>" — 단계 X/Y, <execution_progress.stage_label>, N차 시도.`
 Keep polling the original process handle as well; never launch a second `execute`
 to obtain progress. The public snapshot intentionally omits prompts, raw command
 output, evidence contents, and secrets.

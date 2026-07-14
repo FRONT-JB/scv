@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Presentation-only SCV voice lines for lifecycle and execution output."""
+"""Presentation-only Korean labels and SCV lines for CLI output."""
 
 from __future__ import annotations
 
@@ -20,6 +20,21 @@ SCV_STATE_LINES = {
     "READY": "Job's finished.",
     "BLOCKED": "I can't build there.",
     "ABANDONED": "I'm not readin' you clearly.",
+}
+
+SCV_STATE_LABELS = {
+    "NEW": "태스크 초기화",
+    "INTAKING": "요구사항 접수",
+    "AWAITING_SPEC_APPROVAL": "스펙 승인 대기",
+    "PLANNING": "구현 계획 작성",
+    "AWAITING_PLAN_APPROVAL": "계획 승인 대기",
+    "BASE_REVALIDATION": "승인 기준 재확인",
+    "MATERIALIZING_WORKTREE": "격리 워크트리 생성",
+    "EXECUTING": "실행 중",
+    "HANDOFF": "검증 결과 인계",
+    "READY": "인계 준비 완료",
+    "BLOCKED": "차단됨",
+    "ABANDONED": "포기됨",
 }
 
 SCV_PROGRESS_LINES = {
@@ -49,6 +64,22 @@ SCV_STAGE_LINES = {
     "cancelled": SCV_STATE_LINES["ABANDONED"],
 }
 
+SCV_STAGE_LABELS = {
+    "starting": "실행 환경 준비",
+    "worker": "단계 구현",
+    "acceptance": "단계 인수 검사",
+    "verifier": "단계 읽기 전용 검증",
+    "failure-analysis": "실패 증거 분석",
+    "retry": "재시도 준비",
+    "step-complete": "단계 완료",
+    "final-acceptance": "전체 인수 검사",
+    "final-verifier": "전체 읽기 전용 검증",
+    "complete": "실행 완료",
+    "blocked": "차단됨",
+    "failed": "실패",
+    "cancelled": "취소됨",
+}
+
 
 def _string_value(value: object) -> str | None:
     if isinstance(value, Enum):
@@ -61,6 +92,13 @@ def scv_line_for_state(state: object) -> str | None:
 
     value = _string_value(state)
     return SCV_STATE_LINES.get(value) if value is not None else None
+
+
+def scv_label_for_state(state: object) -> str | None:
+    """Return the Korean presentation label for a durable state."""
+
+    value = _string_value(state)
+    return SCV_STATE_LABELS.get(value) if value is not None else None
 
 
 def scv_line_for_progress(status: object) -> str | None:
@@ -77,14 +115,27 @@ def scv_line_for_stage(stage: object) -> str | None:
     return SCV_STAGE_LINES.get(value) if value is not None else None
 
 
+def scv_label_for_stage(stage: object) -> str | None:
+    """Return the Korean presentation label for an execution stage."""
+
+    value = _string_value(stage)
+    return SCV_STAGE_LABELS.get(value) if value is not None else None
+
+
 def decorate_scv_output(value: Any) -> Any:
-    """Add a computed ``scv_line`` without mutating persisted data."""
+    """Add computed presentation fields without mutating persisted data."""
 
     if isinstance(value, list):
         return [decorate_scv_output(item) for item in value]
     if not isinstance(value, dict):
         return value
     rendered = dict(value)
+    state_label = scv_label_for_state(rendered.get("state"))
+    if state_label is not None:
+        rendered["state_label"] = state_label
+    stage_label = scv_label_for_stage(rendered.get("stage"))
+    if stage_label is not None:
+        rendered["stage_label"] = stage_label
     line = scv_line_for_state(rendered.get("state"))
     if line is None:
         line = scv_line_for_stage(rendered.get("stage"))

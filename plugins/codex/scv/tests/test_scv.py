@@ -904,6 +904,7 @@ class SCVControlPlaneTests(unittest.TestCase):
             {
                 "status": "running",
                 "stage": "worker",
+                "stage_label": "단계 구현",
                 "completed_steps": 0,
                 "total_steps": 1,
                 "current_step": {
@@ -937,6 +938,7 @@ class SCVControlPlaneTests(unittest.TestCase):
             {
                 "status": "pending",
                 "stage": "starting",
+                "stage_label": "실행 환경 준비",
                 "completed_steps": 0,
                 "total_steps": 1,
                 "message": "실행 환경을 준비하고 있습니다.",
