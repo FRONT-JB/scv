@@ -25,6 +25,7 @@ try:  # Support both direct CLI execution and module-based tests.
     from .cli_ko import localize_argparse
     from .execute import (
         EXECUTION_BUSY_EXIT_CODE,
+        PLAN_REVISION_TERMINATIONS,
         ExecutionBusy,
         ExecutorError,
         PlanError,
@@ -43,6 +44,7 @@ except ImportError:  # pragma: no cover - exercised by direct script invocation.
     from cli_ko import localize_argparse
     from execute import (
         EXECUTION_BUSY_EXIT_CODE,
+        PLAN_REVISION_TERMINATIONS,
         ExecutionBusy,
         ExecutorError,
         PlanError,
@@ -503,10 +505,13 @@ def command_submit_plan(args: argparse.Namespace, store: TaskStateStore, repo: P
     previous_failure = task.get("artifacts", {}).get("execution_failure")
     if (
         isinstance(previous_failure, dict)
-        and previous_failure.get("attempts_exhausted") is True
+        and (
+            previous_failure.get("plan_revision_required") is True
+            or previous_failure.get("attempts_exhausted") is True
+        )
         and previous_failure.get("plan_sha256") == value["sha256"]
     ):
-        raise SCVError("실행 시도 횟수를 모두 사용한 계획과 내용이 같습니다. 계획을 수정해 주세요")
+        raise SCVError("실행이 수렴하지 못한 계획과 내용이 같습니다. 계획을 수정해 주세요")
     store.set_artifact(args.task_id, "plan_approval", {"approved": False})
     if current is State.PLANNING:
         return store.record_artifact(
@@ -759,6 +764,8 @@ def _command_execute(args: argparse.Namespace, store: TaskStateStore, repo: Path
         )
     if result.returncode != 0:
         attempts_exhausted = False
+        plan_revision_required = False
+        termination_code: str | None = None
         failed_evidence: dict[str, Any] | None = None
         proposal_id: str | None = None
         failure_reason = f"실행기가 종료 코드 {result.returncode}로 실패했습니다"
@@ -767,11 +774,23 @@ def _command_execute(args: argparse.Namespace, store: TaskStateStore, repo: Path
             try:
                 with locked_status(run_dir) as loaded_evidence:
                     failed_evidence = json.loads(json.dumps(loaded_evidence))
+                    termination = failed_evidence.get("termination")
+                    if isinstance(termination, dict) and isinstance(
+                        termination.get("code"), str
+                    ):
+                        termination_code = termination["code"]
                     attempts_exhausted = any(
                         isinstance(step, dict)
                         and step.get("status") == "failed"
                         and len(step.get("attempts", [])) >= 3
                         for step in failed_evidence.get("steps", [])
+                    )
+                    attempts_exhausted = (
+                        attempts_exhausted or termination_code == "budget_exhausted"
+                    )
+                    plan_revision_required = (
+                        attempts_exhausted
+                        or termination_code in PLAN_REVISION_TERMINATIONS
                     )
                     failure_reason = failed_evidence.get("reason") or failure_reason
                     for step in failed_evidence.get("steps", []):
@@ -795,9 +814,12 @@ def _command_execute(args: argparse.Namespace, store: TaskStateStore, repo: Path
         failure_artifact = {
             "plan_sha256": plan_metadata["sha256"],
             "attempts_exhausted": attempts_exhausted,
+            "plan_revision_required": plan_revision_required,
             "reason": safe_reason(failure_reason),
             "failed_at": utc_now(),
         }
+        if termination_code is not None:
+            failure_artifact["termination_code"] = termination_code
         if proposal_id is not None:
             failure_artifact["improvement_proposal_id"] = proposal_id
         store.set_artifact(
@@ -808,7 +830,9 @@ def _command_execute(args: argparse.Namespace, store: TaskStateStore, repo: Path
         store.block(
             args.task_id,
             reason=safe_reason(failure_reason),
-            resume_from=State.PLANNING if attempts_exhausted else State.EXECUTING,
+            resume_from=(
+                State.PLANNING if plan_revision_required else State.EXECUTING
+            ),
         )
         raise SCVError(f"실행기가 종료 코드 {result.returncode}로 실패하여 태스크를 BLOCKED로 전환했습니다")
     try:

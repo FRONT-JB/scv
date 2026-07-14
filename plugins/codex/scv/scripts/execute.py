@@ -110,6 +110,26 @@ EXECUTION_PROGRESS_STAGES = frozenset(
         "cancelled",
     }
 )
+TERMINATION_NEXT_ACTIONS = {
+    "verified": "review_handoff",
+    "budget_exhausted": "revise_plan",
+    "stalled": "revise_plan",
+    "oscillating": "revise_plan",
+    "verifier_disagreement": "review_or_revise_plan",
+    "environment_blocked": "fix_environment_and_resume",
+    "base_changed": "revalidate_base_and_replan",
+    "cancelled": "resume_or_abandon",
+    "final_acceptance_failed": "review_or_revise_plan",
+    "final_verifier_failed": "review_or_revise_plan",
+}
+PLAN_REVISION_TERMINATIONS = frozenset(
+    {
+        "budget_exhausted",
+        "stalled",
+        "oscillating",
+        "verifier_disagreement",
+    }
+)
 NESTED_SHELL_EXCLUDES = (
     # Exact names are intentionally used here. They are valid for both the
     # documented glob interpretation and CLI releases that describe these
@@ -545,6 +565,12 @@ class Step:
 
 
 @dataclass(frozen=True)
+class LoopPolicy:
+    max_attempts: int
+    detect_stagnation: bool
+
+
+@dataclass(frozen=True)
 class Plan:
     schema_version: int
     task_id: str
@@ -552,6 +578,7 @@ class Plan:
     expected_base_sha: str | None
     steps: tuple[Step, ...]
     final_acceptance: tuple[str, ...]
+    loop_policy: LoopPolicy
     sha256: str
 
 
@@ -899,6 +926,202 @@ def _validated_progress(
     return progress, states
 
 
+def _validated_index_loop_policy(index: Mapping[str, Any]) -> dict[str, Any] | None:
+    value = index.get("loop_policy")
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "max_attempts",
+        "detect_stagnation",
+    }:
+        raise StateError("실행 인덱스의 loop_policy가 올바르지 않습니다")
+    max_attempts = value.get("max_attempts")
+    if type(max_attempts) is not int or not 1 <= max_attempts <= MAX_ATTEMPTS:
+        raise StateError("실행 인덱스의 최대 시도 횟수가 올바르지 않습니다")
+    if type(value.get("detect_stagnation")) is not bool:
+        raise StateError("실행 인덱스의 정체 감지 설정이 올바르지 않습니다")
+    return dict(value)
+
+
+def _convergence_fingerprint(
+    failure_signature: str,
+    workspace_sha256: str,
+    acceptance: Sequence[Mapping[str, Any]],
+) -> str:
+    material = {
+        "failure_signature": failure_signature,
+        "workspace_sha256": workspace_sha256,
+        "acceptance": list(acceptance),
+    }
+    payload = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(b"scv-convergence-v1\0" + payload).hexdigest()
+
+
+def _validated_convergence(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "status",
+        "fingerprint",
+        "failure_signature",
+        "workspace_sha256",
+        "acceptance",
+        "reason",
+    }:
+        raise StateError("시도 수렴 정보가 올바르지 않습니다")
+    status = value.get("status")
+    if status not in {
+        "unavailable",
+        "initial",
+        "changed",
+        "stalled",
+        "oscillating",
+        "verifier_disagreement",
+    }:
+        raise StateError("시도 수렴 상태가 올바르지 않습니다")
+    acceptance = value.get("acceptance")
+    if not isinstance(acceptance, list):
+        raise StateError("시도 수렴 인수 결과가 올바르지 않습니다")
+    for record in acceptance:
+        if not isinstance(record, dict) or set(record) != {
+            "command_sha256",
+            "status",
+            "returncode",
+        }:
+            raise StateError("시도 수렴 인수 항목이 올바르지 않습니다")
+        if not isinstance(record.get("command_sha256"), str) or not SHA256_PATTERN.fullmatch(
+            record["command_sha256"]
+        ):
+            raise StateError("시도 수렴 명령 지문이 올바르지 않습니다")
+        if record.get("status") not in {"passed", "failed", "timed_out"}:
+            raise StateError("시도 수렴 인수 상태가 올바르지 않습니다")
+        returncode = record.get("returncode")
+        if returncode is not None and type(returncode) is not int:
+            raise StateError("시도 수렴 인수 종료 코드가 올바르지 않습니다")
+    if status == "unavailable":
+        if any(
+            value.get(name) is not None
+            for name in ("fingerprint", "failure_signature", "workspace_sha256")
+        ) or acceptance or not isinstance(value.get("reason"), str):
+            raise StateError("사용 불가 수렴 정보가 올바르지 않습니다")
+    else:
+        for name in ("fingerprint", "failure_signature", "workspace_sha256"):
+            candidate = value.get(name)
+            if not isinstance(candidate, str) or not SHA256_PATTERN.fullmatch(candidate):
+                raise StateError(f"시도 수렴 {name} 값이 올바르지 않습니다")
+        if value.get("reason") is not None:
+            raise StateError("관찰된 수렴 정보에는 오류 이유가 없어야 합니다")
+        expected = _convergence_fingerprint(
+            value["failure_signature"],
+            value["workspace_sha256"],
+            acceptance,
+        )
+        if value["fingerprint"] != expected:
+            raise StateError("시도 수렴 지문이 관찰 내용과 일치하지 않습니다")
+    return dict(value)
+
+
+def _validated_termination(index: Mapping[str, Any]) -> dict[str, Any] | None:
+    value = index.get("termination")
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "code",
+        "message",
+        "next_action",
+        "step_id",
+        "attempt",
+    }:
+        raise StateError("실행 종료 정보가 올바르지 않습니다")
+    code = value.get("code")
+    if code not in TERMINATION_NEXT_ACTIONS:
+        raise StateError("실행 종료 코드가 올바르지 않습니다")
+    if value.get("next_action") != TERMINATION_NEXT_ACTIONS[code]:
+        raise StateError("실행 종료 후속 조치가 올바르지 않습니다")
+    if not isinstance(value.get("message"), str) or not value["message"].strip():
+        raise StateError("실행 종료 메시지가 올바르지 않습니다")
+    step_id = value.get("step_id")
+    if step_id is not None and (
+        not isinstance(step_id, str) or not PLAN_ID_PATTERN.fullmatch(step_id)
+    ):
+        raise StateError("실행 종료 단계 ID가 올바르지 않습니다")
+    attempt = value.get("attempt")
+    if attempt is not None and (
+        isinstance(attempt, bool)
+        or not isinstance(attempt, int)
+        or not 1 <= attempt <= MAX_ATTEMPTS
+        or step_id is None
+    ):
+        raise StateError("실행 종료 시도 번호가 올바르지 않습니다")
+    status = index.get("status")
+    if code == "verified" and status != "ready":
+        raise StateError("검증 완료 종료 정보는 ready 상태에만 사용할 수 있습니다")
+    if code in {"environment_blocked", "base_changed"} and status != "blocked":
+        raise StateError("차단 종료 정보와 실행 상태가 일치하지 않습니다")
+    if code == "cancelled" and status != "cancelled":
+        raise StateError("취소 종료 정보와 실행 상태가 일치하지 않습니다")
+    if code in {
+        "budget_exhausted",
+        "stalled",
+        "oscillating",
+        "verifier_disagreement",
+        "final_acceptance_failed",
+        "final_verifier_failed",
+    } and status != "failed":
+        raise StateError("실패 종료 정보와 실행 상태가 일치하지 않습니다")
+    if code in {"stalled", "oscillating", "verifier_disagreement"}:
+        states = index.get("steps")
+        if not isinstance(states, list) or not isinstance(attempt, int):
+            raise StateError("수렴 중단 종료 정보에 단계 시도 연결이 없습니다")
+        state = next(
+            (
+                candidate
+                for candidate in states
+                if isinstance(candidate, dict) and candidate.get("id") == step_id
+            ),
+            None,
+        )
+        attempts = state.get("attempts") if isinstance(state, dict) else None
+        if (
+            not isinstance(attempts, list)
+            or not 1 <= attempt <= len(attempts)
+            or state.get("status") != "failed"
+        ):
+            raise StateError("수렴 중단 종료 정보가 실패 시도와 일치하지 않습니다")
+        convergence = attempts[attempt - 1].get("convergence")
+        validated = _validated_convergence(convergence)
+        if validated is None or validated.get("status") != code:
+            raise StateError("수렴 중단 종료 코드가 시도 증거와 일치하지 않습니다")
+    if code == "budget_exhausted":
+        policy = _validated_index_loop_policy(index)
+        states = index.get("steps")
+        state = None
+        if isinstance(states, list):
+            state = next(
+                (
+                    candidate
+                    for candidate in states
+                    if isinstance(candidate, dict) and candidate.get("id") == step_id
+                ),
+                None,
+            )
+        attempts = state.get("attempts") if isinstance(state, dict) else None
+        approved_max = policy["max_attempts"] if policy is not None else MAX_ATTEMPTS
+        if (
+            not isinstance(attempts, list)
+            or len(attempts) != approved_max
+            or state.get("status") != "failed"
+            or (attempt is not None and attempt != approved_max)
+        ):
+            raise StateError("시도 예산 종료 정보가 승인된 시도 수와 일치하지 않습니다")
+    return dict(value)
+
+
 def _progress_message(stage: str, step_id: str | None, attempt: int | None) -> str:
     target = step_id or "현재 단계"
     attempt_label = f"{attempt}차 " if attempt is not None else ""
@@ -931,7 +1154,9 @@ def summarize_execution_progress(index: Mapping[str, Any]) -> dict[str, Any]:
     status = index.get("status")
     if status not in EXECUTION_STATUSES:
         raise StateError("실행 인덱스의 status가 올바르지 않습니다")
+    _validated_index_loop_policy(index)
     progress, states = _validated_progress(index)
+    termination = _validated_termination(index)
     completed = sum(state.get("status") == "passed" for state in states)
     step_id = progress.get("step_id")
     step_position = progress.get("step_position")
@@ -954,6 +1179,16 @@ def summarize_execution_progress(index: Mapping[str, Any]) -> dict[str, Any]:
     summary["message"] = _progress_message(progress["stage"], step_id, attempt)
     if isinstance(index.get("updated_at"), str):
         summary["updated_at"] = index["updated_at"]
+    if termination is not None:
+        public_termination = {
+            "code": termination["code"],
+            "next_action": termination["next_action"],
+        }
+        if termination["step_id"] is not None:
+            public_termination["step_id"] = termination["step_id"]
+        if termination["attempt"] is not None:
+            public_termination["attempt"] = termination["attempt"]
+        summary["termination"] = public_termination
     return summary
 
 
@@ -1128,6 +1363,7 @@ def validate_persisted_evidence(index: Mapping[str, Any], run_dir: Path) -> None
         for attempt in attempts:
             if not isinstance(attempt, dict):
                 continue
+            _validated_convergence(attempt.get("convergence"))
             expected = attempt.get("evidence_sha256")
             if attempt.get("status") in {"passed", "failed", "timed_out"} and not isinstance(
                 expected, str
@@ -1532,6 +1768,32 @@ def _load_commands(value: Any, label: str, *, required: bool) -> tuple[str, ...]
     return tuple(commands)
 
 
+def _load_loop_policy(value: Any, *, schema_version: int) -> LoopPolicy:
+    if schema_version == 1:
+        if value is not None:
+            raise PlanError("plan.loop_policy는 schema_version 2에서만 사용할 수 있습니다")
+        return LoopPolicy(max_attempts=MAX_ATTEMPTS, detect_stagnation=False)
+
+    policy = _require_object(value, "plan.loop_policy")
+    _reject_unknown_keys(
+        policy,
+        {"max_attempts", "detect_stagnation"},
+        "plan.loop_policy",
+    )
+    max_attempts = policy.get("max_attempts")
+    if type(max_attempts) is not int or not 1 <= max_attempts <= MAX_ATTEMPTS:
+        raise PlanError(
+            f"plan.loop_policy.max_attempts 값은 1~{MAX_ATTEMPTS} 범위의 정수여야 합니다"
+        )
+    detect_stagnation = policy.get("detect_stagnation")
+    if type(detect_stagnation) is not bool:
+        raise PlanError("plan.loop_policy.detect_stagnation 값은 boolean이어야 합니다")
+    return LoopPolicy(
+        max_attempts=max_attempts,
+        detect_stagnation=detect_stagnation,
+    )
+
+
 def load_plan(path: Path, expected_base_override: str | None = None) -> Plan:
     try:
         raw = path.read_bytes()
@@ -1543,20 +1805,24 @@ def load_plan(path: Path, expected_base_override: str | None = None) -> Plan:
         raise PlanError(f"계획이 올바른 UTF-8 JSON이 아닙니다: {exc}") from exc
 
     root = _require_object(document, "plan")
-    _reject_unknown_keys(
-        root,
-        {
-            "schema_version",
-            "task_id",
-            "task",
-            "expected_base_sha",
-            "steps",
-            "final_acceptance",
-        },
-        "plan",
+    schema_version = root.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise PlanError("plan.schema_version은 1 또는 2여야 합니다")
+    allowed_keys = {
+        "schema_version",
+        "task_id",
+        "task",
+        "expected_base_sha",
+        "steps",
+        "final_acceptance",
+    }
+    if schema_version == 2:
+        allowed_keys.add("loop_policy")
+    _reject_unknown_keys(root, allowed_keys, "plan")
+    loop_policy = _load_loop_policy(
+        root.get("loop_policy"),
+        schema_version=schema_version,
     )
-    if root.get("schema_version") != 1:
-        raise PlanError("plan.schema_version은 1이어야 합니다")
     task_id = _require_nonempty_string(root.get("task_id"), "plan.task_id")
     if not PLAN_ID_PATTERN.fullmatch(task_id):
         raise PlanError("plan.task_id에는 영문자, 숫자, 점, 밑줄, 하이픈만 사용할 수 있습니다")
@@ -1620,12 +1886,13 @@ def load_plan(path: Path, expected_base_override: str | None = None) -> Plan:
         root.get("final_acceptance", []), "plan.final_acceptance", required=False
     )
     return Plan(
-        schema_version=1,
+        schema_version=schema_version,
         task_id=task_id,
         task=task,
         expected_base_sha=expected_base,
         steps=tuple(steps),
         final_acceptance=final_acceptance,
+        loop_policy=loop_policy,
         sha256=hashlib.sha256(raw).hexdigest(),
     )
 
@@ -1683,8 +1950,16 @@ class StepExecutor:
         self.index = self._load_or_initialize_index()
         if self.index["status"] == "ready" and not self.revalidate_ready:
             return self._outcome()
+        termination = self.index.get("termination")
+        if (
+            self.index["status"] == "failed"
+            and isinstance(termination, dict)
+            and termination.get("code") in PLAN_REVISION_TERMINATIONS
+        ):
+            return self._outcome()
         self.index["status"] = "running"
         self.index.pop("reason", None)
+        self.index.pop("termination", None)
         self._set_progress("starting")
 
         try:
@@ -1693,10 +1968,15 @@ class StepExecutor:
             for step, step_state in zip(self.plan.steps, self.index["steps"]):
                 if step_state["status"] == "passed":
                     continue
-                if len(step_state["attempts"]) >= MAX_ATTEMPTS:
+                max_attempts = self.plan.loop_policy.max_attempts
+                if len(step_state["attempts"]) >= max_attempts:
                     step_state["status"] = "failed"
                     self.index["status"] = "failed"
-                    self.index["reason"] = f"{step.id} 단계가 최대 시도 횟수 {MAX_ATTEMPTS}회를 모두 사용했습니다"
+                    self._set_termination(
+                        "budget_exhausted",
+                        f"{step.id} 단계가 최대 시도 횟수 {max_attempts}회를 모두 사용했습니다",
+                        step=step,
+                    )
                     self._set_progress("failed", step=step)
                     return self._outcome()
                 if not self._execute_step(step, step_state):
@@ -1705,17 +1985,20 @@ class StepExecutor:
             return self._run_final_validation()
         except CommandCancelled:
             self.index["status"] = "cancelled"
-            self.index["reason"] = "실행이 취소되었습니다"
+            self._set_termination("cancelled", "실행이 취소되었습니다")
             self._set_progress("cancelled")
             raise
         except BaseMismatchError as exc:
             self.index["status"] = "blocked"
-            self.index["reason"] = str(exc)
+            self._set_termination("base_changed", str(exc))
             self._set_progress("blocked")
             raise
         except InfrastructureBlocker as exc:
             self.index["status"] = "blocked"
-            self.index["reason"] = f"실행 환경이 준비되지 않았습니다: {exc}"
+            self._set_termination(
+                "environment_blocked",
+                f"실행 환경이 준비되지 않았습니다: {exc}",
+            )
             self._set_progress("blocked")
             return self._outcome()
 
@@ -1887,7 +2170,10 @@ class StepExecutor:
         }
         if not passed:
             self.index["status"] = "failed"
-            self.index["reason"] = failure or "최종 인수 검증에 실패했습니다"
+            self._set_termination(
+                "final_acceptance_failed",
+                failure or "최종 인수 검증에 실패했습니다",
+            )
             self._seal_final_evidence(final_dir)
             self._set_progress("failed")
             return self._outcome()
@@ -1917,7 +2203,7 @@ class StepExecutor:
         except AttemptFailure as exc:
             self.index["final_validation"]["status"] = "failed"
             self.index["status"] = "failed"
-            self.index["reason"] = str(exc)
+            self._set_termination("final_verifier_failed", str(exc))
             self._seal_final_evidence(final_dir)
             self._set_progress("failed")
             return self._outcome()
@@ -1926,7 +2212,10 @@ class StepExecutor:
             findings = "; ".join(verifier["findings"])
             self.index["final_validation"]["status"] = "failed"
             self.index["status"] = "failed"
-            self.index["reason"] = findings or verifier["summary"]
+            self._set_termination(
+                "final_verifier_failed",
+                findings or verifier["summary"],
+            )
             self._seal_final_evidence(final_dir)
             self._set_progress("failed")
             return self._outcome()
@@ -1954,6 +2243,7 @@ class StepExecutor:
         self.index["final_validation"]["status"] = "passed"
         self.index["status"] = "ready"
         self.index["completed_at"] = _utc_now()
+        self._set_termination("verified", "모든 실행과 검증을 완료했습니다")
         self._set_progress("complete")
         return self._outcome()
 
@@ -1976,6 +2266,29 @@ class StepExecutor:
             completed_steps=completed,
             total_steps=len(self.plan.steps),
         )
+
+    def _set_termination(
+        self,
+        code: str,
+        message: str,
+        *,
+        step: Step | None = None,
+        attempt_number: int | None = None,
+    ) -> None:
+        if code not in TERMINATION_NEXT_ACTIONS:
+            raise StateError(f"지원하지 않는 실행 종료 코드입니다: {code}")
+        rendered = redact_text(message, 4_000) or "실행이 종료되었습니다"
+        self.index["termination"] = {
+            "code": code,
+            "message": rendered,
+            "next_action": TERMINATION_NEXT_ACTIONS[code],
+            "step_id": step.id if step is not None else None,
+            "attempt": attempt_number,
+        }
+        if code == "verified":
+            self.index.pop("reason", None)
+        else:
+            self.index["reason"] = rendered
 
     def _assert_git_root(self) -> None:
         result = self.runner.run(
@@ -2024,6 +2337,11 @@ class StepExecutor:
                 "schema_version": 1,
                 "task_id": self.plan.task_id,
                 "plan_sha256": self.plan.sha256,
+                "plan_schema_version": self.plan.schema_version,
+                "loop_policy": {
+                    "max_attempts": self.plan.loop_policy.max_attempts,
+                    "detect_stagnation": self.plan.loop_policy.detect_stagnation,
+                },
                 "expected_base_sha": expected,
                 "workspace": str(self.root),
                 "status": "pending",
@@ -2069,6 +2387,22 @@ class StepExecutor:
         for key, expected in comparisons.items():
             if index.get(key) != expected:
                 raise StateError(f"실행 인덱스의 {key} 값이 현재 호출과 일치하지 않습니다")
+        stored_plan_schema = index.get("plan_schema_version")
+        if stored_plan_schema is not None and (
+            type(stored_plan_schema) is not int
+            or stored_plan_schema not in {1, 2}
+            or stored_plan_schema != self.plan.schema_version
+        ):
+            raise StateError("실행 인덱스의 plan_schema_version이 현재 계획과 일치하지 않습니다")
+        stored_loop_policy = _validated_index_loop_policy(index)
+        expected_loop_policy = {
+            "max_attempts": self.plan.loop_policy.max_attempts,
+            "detect_stagnation": self.plan.loop_policy.detect_stagnation,
+        }
+        if stored_loop_policy is not None and stored_loop_policy != expected_loop_policy:
+            raise StateError("실행 인덱스의 loop_policy가 현재 계획과 일치하지 않습니다")
+        if self.plan.schema_version == 2 and stored_loop_policy is None:
+            raise StateError("schema_version 2 실행 인덱스에 loop_policy가 없습니다")
         if self.plan.expected_base_sha and index.get("expected_base_sha") != self.plan.expected_base_sha:
             raise StateError("실행 인덱스의 expected_base_sha가 계획과 일치하지 않습니다")
         states = index.get("steps")
@@ -2086,6 +2420,7 @@ class StepExecutor:
             raise StateError("실행 인덱스의 status가 올바르지 않습니다")
         changed = False
         _validated_progress(index)
+        _validated_termination(index)
         for state in states:
             step_id = state.get("id")
             if state.get("status") not in {
@@ -2097,7 +2432,10 @@ class StepExecutor:
             }:
                 raise StateError(f"{step_id} 단계의 저장된 상태가 올바르지 않습니다")
             attempts = state.get("attempts")
-            if not isinstance(attempts, list) or len(attempts) > MAX_ATTEMPTS:
+            if (
+                not isinstance(attempts, list)
+                or len(attempts) > self.plan.loop_policy.max_attempts
+            ):
                 raise StateError(f"{step_id} 단계의 저장된 시도 정보가 올바르지 않습니다")
             blockers = state.get("blockers")
             if blockers is None:
@@ -2123,7 +2461,7 @@ class StepExecutor:
 
             # A durable running record is written before retry-context assembly.
             # If the controller dies before the worker dispatch marker is saved,
-            # that bookkeeping-only record must not spend one of the three tries.
+            # that bookkeeping-only record must not spend an approved try.
             if attempts and isinstance(attempts[-1], dict):
                 last_attempt = attempts[-1]
                 launch = last_attempt.get("worker_launch")
@@ -2171,6 +2509,7 @@ class StepExecutor:
                     "passed",
                 }:
                     raise StateError(f"{step_id} 단계의 저장된 시도 상태가 올바르지 않습니다")
+                _validated_convergence(attempt.get("convergence"))
                 if not isinstance(attempt.get("started_at"), str) or not isinstance(
                     attempt.get("evidence"), str
                 ):
@@ -2227,10 +2566,21 @@ class StepExecutor:
                 raise StateError(
                     f"{step_id} 단계의 상태가 통과 시도 기록과 일치하지 않습니다"
                 )
-            if state.get("status") == "failed" and len(attempts) != MAX_ATTEMPTS:
-                raise StateError(
-                    f"{step_id} 단계는 최대 시도를 사용하기 전에 failed일 수 없습니다"
+            if state.get("status") == "failed":
+                termination = index.get("termination")
+                early_stop = (
+                    isinstance(termination, dict)
+                    and termination.get("code")
+                    in {"stalled", "oscillating", "verifier_disagreement"}
+                    and termination.get("step_id") == step_id
                 )
+                if (
+                    len(attempts) != self.plan.loop_policy.max_attempts
+                    and not early_stop
+                ):
+                    raise StateError(
+                        f"{step_id} 단계는 최대 시도 또는 수렴 중단 없이 failed일 수 없습니다"
+                    )
             if state.get("status") == "cancelled" and (
                 not attempts or attempts[-1].get("status") != "cancelled"
             ):
@@ -2303,7 +2653,8 @@ class StepExecutor:
         atomic_write_json(self.index_path, self.index)
 
     def _execute_step(self, step: Step, step_state: dict[str, Any]) -> bool:
-        while len(step_state["attempts"]) < MAX_ATTEMPTS:
+        max_attempts = self.plan.loop_policy.max_attempts
+        while len(step_state["attempts"]) < max_attempts:
             attempt_number = len(step_state["attempts"]) + 1
             if attempt_number > 1:
                 self._set_progress(
@@ -2410,11 +2761,50 @@ class StepExecutor:
                     step_state,
                     failure,
                 )
-                if len(step_state["attempts"]) >= MAX_ATTEMPTS:
+                convergence_code = self._record_convergence(
+                    step,
+                    attempt_number,
+                    attempt_dir,
+                    attempt,
+                    step_state,
+                    failure,
+                )
+                if convergence_code is not None:
                     step_state["status"] = "failed"
                     self.index["status"] = "failed"
-                    self.index["reason"] = (
-                        f"{step.id} 단계가 최대 시도 횟수 {MAX_ATTEMPTS}회를 모두 사용했습니다: {failure}"
+                    if convergence_code == "verifier_disagreement":
+                        reason = (
+                            f"{step.id} 단계에서 같은 검증자 지적과 동일한 워크트리 상태가 "
+                            "반복되었습니다"
+                        )
+                    elif convergence_code == "oscillating":
+                        reason = (
+                            f"{step.id} 단계가 이전 실패 상태로 되돌아가는 진동을 감지했습니다"
+                        )
+                    else:
+                        reason = (
+                            f"{step.id} 단계에서 같은 실패와 동일한 워크트리 상태가 "
+                            "반복되어 진전이 없습니다"
+                        )
+                    self._set_termination(
+                        convergence_code,
+                        reason,
+                        step=step,
+                        attempt_number=attempt_number,
+                    )
+                    self._set_progress(
+                        "failed", step=step, attempt_number=attempt_number
+                    )
+                    return False
+                if len(step_state["attempts"]) >= max_attempts:
+                    step_state["status"] = "failed"
+                    self.index["status"] = "failed"
+                    self._set_termination(
+                        "budget_exhausted",
+                        f"{step.id} 단계가 최대 시도 횟수 {max_attempts}회를 "
+                        f"모두 사용했습니다: {failure}",
+                        step=step,
+                        attempt_number=attempt_number,
                     )
                     self._set_progress(
                         "failed", step=step, attempt_number=attempt_number
@@ -2468,6 +2858,110 @@ class StepExecutor:
                 ) from exc
         step_state["status"] = "pending"
         self._save_index()
+
+    @staticmethod
+    def _acceptance_vector(attempt_dir: Path) -> list[dict[str, Any]]:
+        vector: list[dict[str, Any]] = []
+        for record in StepExecutor._load_acceptance_records(attempt_dir):
+            command = record.get("command")
+            if not isinstance(command, str):
+                continue
+            returncode = record.get("returncode")
+            vector.append(
+                {
+                    "command_sha256": hashlib.sha256(
+                        " ".join(command.split()).encode("utf-8")
+                    ).hexdigest(),
+                    "status": record.get("status"),
+                    "returncode": returncode if type(returncode) is int else None,
+                }
+            )
+        return vector
+
+    def _record_convergence(
+        self,
+        step: Step,
+        attempt_number: int,
+        attempt_dir: Path,
+        attempt: dict[str, Any],
+        step_state: Mapping[str, Any],
+        failure: AttemptFailure,
+    ) -> str | None:
+        if not self.plan.loop_policy.detect_stagnation:
+            return None
+        try:
+            workspace_sha256 = self.workspace_fingerprinter(self.root)
+            if (
+                not isinstance(workspace_sha256, str)
+                or not SHA256_PATTERN.fullmatch(workspace_sha256)
+            ):
+                raise ValueError("워크트리 지문이 올바른 SHA-256이 아닙니다")
+            evidence_sha256 = attempt.get("evidence_sha256")
+            if not isinstance(evidence_sha256, str):
+                raise ValueError("실패 증거 SHA-256이 없습니다")
+            acceptance_records = self._load_acceptance_records(attempt_dir)
+            failure_record = build_failure_record(
+                task_id=self.plan.task_id,
+                plan_sha256=self.plan.sha256,
+                step_id=step.id,
+                attempt_number=attempt_number,
+                stage=failure.stage,
+                message=failure.message,
+                evidence_sha256=evidence_sha256,
+                acceptance_records=acceptance_records,
+                scope="\n".join((step.title, *step.acceptance)),
+            )
+            acceptance = self._acceptance_vector(attempt_dir)
+            fingerprint = _convergence_fingerprint(
+                failure_record["signature"],
+                workspace_sha256,
+                acceptance,
+            )
+        except (LearningError, OSError, StateError, ValueError) as exc:
+            attempt["convergence"] = {
+                "status": "unavailable",
+                "fingerprint": None,
+                "failure_signature": None,
+                "workspace_sha256": None,
+                "acceptance": [],
+                "reason": redact_text(exc, 1_000),
+            }
+            self._save_index()
+            return None
+
+        previous: list[dict[str, Any]] = []
+        for candidate in step_state.get("attempts", [])[: attempt_number - 1]:
+            if not isinstance(candidate, dict):
+                continue
+            convergence = candidate.get("convergence")
+            if (
+                isinstance(convergence, dict)
+                and convergence.get("status") != "unavailable"
+                and isinstance(convergence.get("fingerprint"), str)
+            ):
+                previous.append(convergence)
+
+        status = "initial" if not previous else "changed"
+        termination_code: str | None = None
+        if previous and previous[-1]["fingerprint"] == fingerprint:
+            termination_code = (
+                "verifier_disagreement" if failure.stage == "verifier" else "stalled"
+            )
+            status = termination_code
+        elif any(item["fingerprint"] == fingerprint for item in previous[:-1]):
+            termination_code = "oscillating"
+            status = "oscillating"
+
+        attempt["convergence"] = {
+            "status": status,
+            "fingerprint": fingerprint,
+            "failure_signature": failure_record["signature"],
+            "workspace_sha256": workspace_sha256,
+            "acceptance": acceptance,
+            "reason": None,
+        }
+        self._save_index()
+        return termination_code
 
     def _finish_blocked_attempt(
         self,
@@ -3170,7 +3664,20 @@ repeat secrets. Return structured output only.
         context: dict[str, Any] = {
             "stage": previous.get("stage", "unknown"),
             "message": redact_text(previous.get("message", "")),
+            "loop_budget": {
+                "current_attempt": len(attempts),
+                "max_attempts": self.plan.loop_policy.max_attempts,
+                "remaining_after_current": max(
+                    self.plan.loop_policy.max_attempts - len(attempts), 0
+                ),
+            },
         }
+        previous_convergence = attempts[-2].get("convergence")
+        if isinstance(previous_convergence, dict):
+            context["previous_convergence"] = {
+                "status": previous_convergence.get("status"),
+                "failure_signature": previous_convergence.get("failure_signature"),
+            }
         learning = attempts[-2].get("learning")
         if isinstance(learning, dict) and learning.get("status") == "analysis-running":
             previous_attempt_number = attempts[-2].get("number")
@@ -3238,6 +3745,7 @@ repeat secrets. Return structured output only.
 
 Task: {self.plan.task}
 Step {step.id}: {step.title}
+Attempt: {attempt_number}/{self.plan.loop_policy.max_attempts}
 Instructions:
 {step.instructions}
 {retry_context}
@@ -3653,6 +4161,8 @@ def _read_status_unlocked(root: Path) -> dict[str, Any]:
     value = _read_index_snapshot(root)
     if value.get("status") not in EXECUTION_STATUSES:
         raise StateError("실행 인덱스의 status가 올바르지 않습니다")
+    _validated_index_loop_policy(value)
+    _validated_termination(value)
     validate_persisted_evidence(value, root)
     return value
 

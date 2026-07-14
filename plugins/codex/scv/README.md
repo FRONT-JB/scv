@@ -22,6 +22,9 @@ SCV는 macOS에서 요구사항 정리부터 구현 계획 승인, 격리 워크
   `scv_line`을 덧붙인다. 한글 라벨과 대사는 표시 전용이며 기존 상태값과 종료
   코드가 계속 권위 있는 계약이다.
 - 실행 중 `status`는 단계·시도·완료 개수만 담은 `execution_progress`를 반환한다. 프롬프트, 원시 출력, 증거 본문, 환경값은 반환하지 않으며 실행기 잠금을 방해하지 않는다.
+- 새 계획은 v2의 얕은 `loop_policy`로 총 시도 횟수를 승인하며 기본값은 2회,
+  하드 캡은 3회다. 같은 실패·인수 결과·워크트리 지문이 반복되거나 이전
+  상태로 되돌아가면 추가 모델 호출이나 인수 검사 없이 조기 중단한다.
 - 타임아웃을 제외한 구현·인수·검증 실패에는 별도의 읽기 전용 Failure Analyst를 한 번 호출하고, 정제된 분석만 다음 worker 재시도에 전달한다. 타임아웃은 원래 태스크의 제한된 재시도·증거로만 남긴다.
 - 성공한 재시도의 교훈은 `candidate`로만 저장한다. 최종 실행 증거와 명시적 승인을 거친 `active` lesson만 같은 실패 signature에 재사용한다.
 - 실행 중인 SCV는 자기 코드를 수정하지 않는다. 독립 분석이 제어기 결함으로 판정한 경우에만 개선 제안을 남기고 별도 소스 worktree 작업으로 넘긴다. 일반 구현 소진·타임아웃·환경 실패는 원래 태스크에서 처리한다.
@@ -106,9 +109,13 @@ $scv:improve 태스크 20260713-example에서 생성된 실패 학습 후보를 
 | `step-complete` | 단계 완료 | `Job's finished.` |
 | `final-acceptance` | 전체 인수 검사 | `Affirmative.` |
 | `final-verifier` | 전체 읽기 전용 검증 | `I read you.` |
-| `complete` | 실행 증거 완료 | `Job's finished.` |
-| `blocked` / `failed` | 차단 또는 실패 | `I can't build there.` |
-| `cancelled` | 실행 취소 | `I'm not readin' you clearly.` |
+| `complete` | 실행 완료 | `Job's finished.` |
+| `blocked` / `failed` | 차단됨 / 실패 | `I can't build there.` |
+| `cancelled` | 취소됨 | `I'm not readin' you clearly.` |
+
+종료된 진행에는 원시 실패 본문 대신 `termination.code`와
+`termination.next_action`이 포함될 수 있다. `stalled`, `oscillating`,
+`verifier_disagreement`, `budget_exhausted`는 계획 수정과 재승인이 필요하다.
 
 ## 검증
 

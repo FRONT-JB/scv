@@ -829,6 +829,163 @@ class ExecutorTestCase(unittest.TestCase):
         self.assertEqual("failed", progress["stage"])
         self.assertEqual(3, progress["attempt"])
 
+    def test_v2_shallow_loop_stops_repeated_failure_after_two_attempts(self) -> None:
+        self.write_plan(
+            schema_version=2,
+            loop_policy={"max_attempts": 2, "detect_stagnation": True},
+        )
+        runner = FakeRunner(self.root, self.sha)
+        runner.acceptance_behaviors = [1, 1, 1]
+
+        outcome = self.execute(runner)
+
+        self.assertEqual("failed", outcome.status)
+        index = self.read_index()
+        attempts = index["steps"][0]["attempts"]
+        self.assertEqual(2, len(attempts))
+        self.assertEqual(
+            ["initial", "stalled"],
+            [attempt["convergence"]["status"] for attempt in attempts],
+        )
+        self.assertEqual("stalled", index["termination"]["code"])
+        self.assertEqual("revise_plan", index["termination"]["next_action"])
+        self.assertEqual(2, self.codex_roles(runner).count("worker"))
+        progress = self.read_progress()
+        self.assertEqual(
+            {
+                "code": "stalled",
+                "next_action": "revise_plan",
+                "step_id": "step-1",
+                "attempt": 2,
+            },
+            progress["termination"],
+        )
+
+    def test_v2_shallow_loop_uses_budget_when_workspace_keeps_changing(self) -> None:
+        self.write_plan(
+            schema_version=2,
+            loop_policy={"max_attempts": 2, "detect_stagnation": True},
+        )
+        runner = FakeRunner(self.root, self.sha)
+        runner.acceptance_behaviors = [1, 1]
+        fingerprints = iter(("1" * 64, "2" * 64))
+
+        outcome = self.execute(
+            runner,
+            workspace_fingerprinter=lambda _: next(fingerprints),
+        )
+
+        self.assertEqual("failed", outcome.status)
+        index = self.read_index()
+        self.assertEqual("budget_exhausted", index["termination"]["code"])
+        self.assertEqual(
+            ["initial", "changed"],
+            [
+                attempt["convergence"]["status"]
+                for attempt in index["steps"][0]["attempts"]
+            ],
+        )
+
+    def test_v2_unavailable_convergence_fingerprint_keeps_bounded_retry(self) -> None:
+        self.write_plan(
+            schema_version=2,
+            loop_policy={"max_attempts": 2, "detect_stagnation": True},
+        )
+        runner = FakeRunner(self.root, self.sha)
+        runner.acceptance_behaviors = [1, 1]
+
+        outcome = self.execute(
+            runner,
+            workspace_fingerprinter=mock.Mock(side_effect=OSError("git unavailable")),
+        )
+
+        self.assertEqual("failed", outcome.status)
+        index = self.read_index()
+        self.assertEqual("budget_exhausted", index["termination"]["code"])
+        self.assertEqual(
+            ["unavailable", "unavailable"],
+            [
+                attempt["convergence"]["status"]
+                for attempt in index["steps"][0]["attempts"]
+            ],
+        )
+
+    def test_v2_loop_detects_workspace_oscillation(self) -> None:
+        self.write_plan(
+            schema_version=2,
+            loop_policy={"max_attempts": 3, "detect_stagnation": True},
+        )
+        runner = FakeRunner(self.root, self.sha)
+        runner.acceptance_behaviors = [1, 1, 1]
+        fingerprints = iter(("1" * 64, "2" * 64, "1" * 64))
+
+        outcome = self.execute(
+            runner,
+            workspace_fingerprinter=lambda _: next(fingerprints),
+        )
+
+        self.assertEqual("failed", outcome.status)
+        index = self.read_index()
+        self.assertEqual("oscillating", index["termination"]["code"])
+        self.assertEqual(
+            ["initial", "changed", "oscillating"],
+            [
+                attempt["convergence"]["status"]
+                for attempt in index["steps"][0]["attempts"]
+            ],
+        )
+
+    def test_v2_loop_names_repeated_verifier_disagreement(self) -> None:
+        self.write_plan(
+            schema_version=2,
+            loop_policy={"max_attempts": 3, "detect_stagnation": True},
+        )
+        runner = FakeRunner(self.root, self.sha)
+        runner.verifier_behaviors = [
+            {"verdict": "fail", "summary": "edge case", "findings": ["add test"]},
+            {"verdict": "fail", "summary": "edge case", "findings": ["add test"]},
+        ]
+
+        outcome = self.execute(runner)
+
+        self.assertEqual("failed", outcome.status)
+        index = self.read_index()
+        self.assertEqual("verifier_disagreement", index["termination"]["code"])
+        self.assertEqual(2, len(index["steps"][0]["attempts"]))
+
+    def test_v2_stagnation_detection_adds_no_success_path_fingerprint(self) -> None:
+        self.write_plan(
+            schema_version=2,
+            loop_policy={"max_attempts": 2, "detect_stagnation": True},
+        )
+        fingerprinter = mock.Mock(return_value="f" * 64)
+
+        outcome = self.execute(
+            FakeRunner(self.root, self.sha),
+            workspace_fingerprinter=fingerprinter,
+        )
+
+        self.assertTrue(outcome.ready)
+        self.assertEqual(1, fingerprinter.call_count)
+        self.assertEqual("verified", self.read_index()["termination"]["code"])
+
+    def test_v2_convergence_fingerprint_tampering_is_rejected(self) -> None:
+        self.write_plan(
+            schema_version=2,
+            loop_policy={"max_attempts": 2, "detect_stagnation": True},
+        )
+        runner = FakeRunner(self.root, self.sha)
+        runner.acceptance_behaviors = [1, 1]
+        self.assertEqual("failed", self.execute(runner).status)
+        index = self.read_index()
+        index["steps"][0]["attempts"][0]["convergence"]["workspace_sha256"] = (
+            "0" * 64
+        )
+        execute.atomic_write_json(self.run_dir / "index.json", index)
+
+        with self.assertRaisesRegex(execute.StateError, "수렴 지문"):
+            execute.read_status(self.run_dir)
+
     def test_success_path_does_not_invoke_failure_analyst(self) -> None:
         self.write_plan()
         runner = FakeRunner(self.root, self.sha)
@@ -1663,6 +1820,39 @@ class ExecutorTestCase(unittest.TestCase):
 
         with self.assertRaises(execute.StateError):
             self.execute(FakeRunner(self.root, self.sha))
+
+    def test_boolean_plan_schema_version_is_rejected(self) -> None:
+        self.write_plan(schema_version=True)
+
+        with self.assertRaisesRegex(execute.PlanError, "schema_version"):
+            execute.load_plan(self.plan_path, self.sha)
+
+    def test_v2_plan_requires_a_bounded_loop_policy(self) -> None:
+        self.write_plan(schema_version=2)
+
+        with self.assertRaisesRegex(execute.PlanError, "loop_policy"):
+            execute.load_plan(self.plan_path, self.sha)
+
+        invalid_policies = (
+            {"max_attempts": True, "detect_stagnation": True},
+            {"max_attempts": 0, "detect_stagnation": True},
+            {"max_attempts": 4, "detect_stagnation": True},
+            {"max_attempts": 2, "detect_stagnation": 1},
+            {"max_attempts": 2, "detect_stagnation": True, "unknown": False},
+        )
+        for policy in invalid_policies:
+            with self.subTest(policy=policy):
+                self.write_plan(schema_version=2, loop_policy=policy)
+                with self.assertRaises(execute.PlanError):
+                    execute.load_plan(self.plan_path, self.sha)
+
+    def test_v1_plan_keeps_legacy_three_attempt_policy(self) -> None:
+        self.write_plan()
+
+        plan = execute.load_plan(self.plan_path, self.sha)
+
+        self.assertEqual(execute.MAX_ATTEMPTS, plan.loop_policy.max_attempts)
+        self.assertFalse(plan.loop_policy.detect_stagnation)
 
     def test_expected_base_override_must_match_plan(self) -> None:
         self.write_plan()

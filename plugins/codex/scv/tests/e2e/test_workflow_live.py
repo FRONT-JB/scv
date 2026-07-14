@@ -187,9 +187,13 @@ class SCVLiveWorkflowE2ETests(unittest.TestCase):
         plan.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "task_id": self.task_id,
                     "task": "Add typed subtraction with regression coverage",
+                    "loop_policy": {
+                        "max_attempts": 2,
+                        "detect_stagnation": True,
+                    },
                     "steps": [
                         {
                             "id": "step-1",
@@ -282,9 +286,13 @@ class SCVLiveWorkflowE2ETests(unittest.TestCase):
         plan.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "task_id": self.task_id,
                     "task": "Implement subtraction and verify failure-aware retry",
+                    "loop_policy": {
+                        "max_attempts": 2,
+                        "detect_stagnation": True,
+                    },
                     "steps": [
                         {
                             "id": "step-1",

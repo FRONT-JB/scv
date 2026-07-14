@@ -187,25 +187,31 @@ class SCVControlPlaneTests(unittest.TestCase):
             self.args(task_id=task_id), self.store, self.repo
         )
 
-    def submit_and_approve_plan(self, task_id: str) -> dict:
+    def submit_and_approve_plan(
+        self, task_id: str, *, schema_version: int = 1
+    ) -> dict:
         plan = self.root / f"{task_id}-plan.json"
-        plan.write_text(
-            json.dumps(
+        document = {
+            "schema_version": schema_version,
+            "task_id": task_id,
+            "task": "Change the tracked sample",
+            "steps": [
                 {
-                    "schema_version": 1,
-                    "task_id": task_id,
-                    "task": "Change the tracked sample",
-                    "steps": [
-                        {
-                            "id": "step-1",
-                            "title": "Implement the change",
-                            "instructions": "Update README.md and keep the behavior verified.",
-                            "acceptance": ["git diff --check"],
-                        }
-                    ],
-                    "final_acceptance": ["git status --short"],
+                    "id": "step-1",
+                    "title": "Implement the change",
+                    "instructions": "Update README.md and keep the behavior verified.",
+                    "acceptance": ["git diff --check"],
                 }
-            ),
+            ],
+            "final_acceptance": ["git status --short"],
+        }
+        if schema_version == 2:
+            document["loop_policy"] = {
+                "max_attempts": 2,
+                "detect_stagnation": True,
+            }
+        plan.write_text(
+            json.dumps(document),
             encoding="utf-8",
         )
         scv.command_submit_plan(
@@ -237,6 +243,20 @@ class SCVControlPlaneTests(unittest.TestCase):
         saved = json.loads((self.store.task_dir("plan-task") / "plan.json").read_text())
         self.assertEqual(self.run_git("rev-parse", "HEAD"), saved["expected_base_sha"])
         self.assertEqual(1, len(scv.parse_worktrees(self.repo)))
+
+    def test_plan_target_accepts_the_v2_shallow_loop_policy(self) -> None:
+        self.start("plan-v2", "plan")
+        self.submit_and_approve_spec("plan-v2")
+
+        task = self.submit_and_approve_plan("plan-v2", schema_version=2)
+
+        self.assertEqual(State.READY.value, task["state"])
+        saved = json.loads((self.store.task_dir("plan-v2") / "plan.json").read_text())
+        self.assertEqual(2, saved["schema_version"])
+        self.assertEqual(
+            {"max_attempts": 2, "detect_stagnation": True},
+            saved["loop_policy"],
+        )
 
     def test_plan_to_full_promotion_preflights_before_state_change(self) -> None:
         self.start("promote-task", "plan")
@@ -504,6 +524,72 @@ class SCVControlPlaneTests(unittest.TestCase):
         )
         self.assertEqual(State.PLANNING.value, resumed["state"])
         self.assertTrue(Path(executing["worktree"]["path"]).is_dir())
+
+    def test_stalled_execution_requires_a_revised_plan_before_resume(self) -> None:
+        self.full_task_through_plan("stalled-task")
+        scv.command_materialize(
+            self.args(task_id="stalled-task", worktree=None, branch=None),
+            self.store,
+            self.repo,
+        )
+        failed_evidence = {
+            "status": "failed",
+            "reason": "같은 실패와 워크트리 상태가 반복되었습니다",
+            "termination": {
+                "code": "stalled",
+                "message": "같은 실패와 워크트리 상태가 반복되었습니다",
+                "next_action": "revise_plan",
+                "step_id": "step-1",
+                "attempt": 2,
+            },
+            "steps": [
+                {
+                    "id": "step-1",
+                    "status": "failed",
+                    "attempts": [{}, {}],
+                }
+            ],
+        }
+        real_run = subprocess.run
+
+        def failure_with_real_git(command: list[str], *args: object, **kwargs: object):
+            if len(command) > 1 and Path(command[1]).name == "execute.py":
+                run_dir = Path(command[command.index("--run-dir") + 1])
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "index.json").write_text("{}\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 1)
+            return real_run(command, *args, **kwargs)
+
+        with mock.patch.object(
+            scv.subprocess, "run", side_effect=failure_with_real_git
+        ), mock.patch.object(scv, "locked_status") as status:
+            status.return_value.__enter__.return_value = failed_evidence
+            with self.assertRaises(scv.SCVError):
+                scv.command_execute(
+                    self.args(task_id="stalled-task", timeout=30),
+                    self.store,
+                    self.repo,
+                )
+
+        blocked = self.store.load("stalled-task")
+        failure = blocked["artifacts"]["execution_failure"]
+        self.assertEqual(State.PLANNING.value, blocked["resume"]["resume_from"])
+        self.assertFalse(failure["attempts_exhausted"])
+        self.assertTrue(failure["plan_revision_required"])
+        self.assertEqual("stalled", failure["termination_code"])
+        resumed = scv.command_resume(
+            self.args(task_id="stalled-task"), self.store, self.repo
+        )
+        self.assertEqual(State.PLANNING.value, resumed["state"])
+        with self.assertRaisesRegex(scv.SCVError, "계획을 수정"):
+            scv.command_submit_plan(
+                self.args(
+                    task_id="stalled-task",
+                    plan=str(self.root / "stalled-task-plan.json"),
+                ),
+                self.store,
+                self.repo,
+            )
 
     def test_concurrent_controller_execute_is_rejected_without_state_change(self) -> None:
         self.full_task_through_plan("concurrent-execute")

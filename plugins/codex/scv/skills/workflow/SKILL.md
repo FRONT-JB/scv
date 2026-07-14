@@ -57,7 +57,7 @@ Present the specification and request explicit approval. Approval must be a user
 
 ### 2. Implementation plan
 
-For `plan` and `full`, turn the approved specification into ordered, reviewable steps. Name concrete files or symbols where evidence supports them, encode dependencies by step order, include exact verification commands, and identify rollback and handoff evidence. Keep unknowns explicit instead of inventing repository facts. Use the exact plan v1 JSON shape in the workflow contract; the executor rejects unknown fields.
+For `plan` and `full`, turn the approved specification into ordered, reviewable steps. Name concrete files or symbols where evidence supports them, encode dependencies by step order, include exact verification commands, and identify rollback and handoff evidence. Keep unknowns explicit instead of inventing repository facts. Use the exact plan v2 JSON shape in the workflow contract with the shallow loop policy; the executor rejects unknown fields. Legacy v1 plans remain readable only for backward compatibility.
 
 Write the plan artifact outside tracked repository content, then submit it:
 
@@ -95,11 +95,17 @@ Keep polling the original process handle as well; never launch a second `execute
 to obtain progress. The public snapshot intentionally omits prompts, raw command
 output, evidence contents, and secrets.
 
+When a terminal snapshot includes `termination`, report its code and
+`next_action` without expanding the hidden reason or evidence. For
+`budget_exhausted`, `stalled`, `oscillating`, or `verifier_disagreement`, return
+to planning and require a materially changed, separately approved plan; do not
+resume the same plan merely because unused attempts remain.
+
 The control plane invokes `scripts/execute.py`; do not call the executor directly during the normal workflow. Direct executor use is reserved for recovery or debugging: inspect its `--help`, preserve the task state, and explain why bypassing the control-plane wrapper is necessary before doing so.
 
 Monitor the command, preserve failure evidence, and report a blocked state promptly. Do not mark a step complete based only on worker narration; require the recorded acceptance checks. Use `resume <task-id>` after the blocking condition is corrected.
 
-On an actionable worker, acceptance, or verifier failure, let the controller run its Failure Analyst flow. Do not reproduce it in the main session. The controller freezes the failed evidence, launches one ephemeral read-only analyst per step/run/signature, injects the bounded diagnosis into the next worker, and keeps the worker attempt cap at three. Analyst failure degrades to the original retry behavior and must not create a new blocker.
+On an actionable worker, acceptance, or verifier failure, let the controller run its Failure Analyst flow. Do not reproduce it in the main session. The controller freezes the failed evidence, launches one ephemeral read-only analyst per step/run/signature, and injects the bounded diagnosis into the next worker. Plan v2 uses two total attempts by default and never permits more than three. When the same failure, acceptance vector, and workspace fingerprint repeat, or a prior fingerprint recurs, the controller stops early with a named termination instead of spending the remaining budget. This comparison uses persisted controller evidence and must not launch another model or validation command. Analyst failure degrades to the original retry behavior and must not create a new blocker.
 
 Timeouts keep their bounded attempt evidence but do not produce cross-task
 lessons or SCV repair proposals; treat them as an original-task execution or

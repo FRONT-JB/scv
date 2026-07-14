@@ -23,6 +23,7 @@ Use this contract as the authoritative model for task state, gates, and artifact
 17. Freeze actionable failure evidence before launching a read-only Failure Analyst, and store analyst evidence under a separately hashed path.
 18. Keep cross-task learning human-gated: create candidates after a verified retry, inject only active exact-signature lessons, and route SCV defects to proposal-only improvement work.
 19. Add the mapped SCV voice line only at CLI output boundaries. Never persist `scv_line`, use it for state transitions, or treat it as stronger evidence than `state`, `status`, exit codes, and verified artifacts.
+20. Keep plan v2 retries shallow: use an approved attempt budget, compare only controller-owned failure and workspace fingerprints, and stop repeated or oscillating failures without another model call or acceptance run.
 
 ## Targets
 
@@ -64,10 +65,11 @@ Executor status output applies the same presentation rule to `pending`,
 `running`, `ready`, and failure statuses.
 
 While a full task is `EXECUTING`, `status TASK_ID` also returns a sanitized
-`execution_progress` object. It contains only `status`, `stage`, completed and
-total step counts, the current step ID/position/status when applicable, the
-bounded attempt number, a controller-authored message, `updated_at`, and the
-computed stage `scv_line`. It never returns plan instructions, prompts, raw
+`execution_progress` object. It contains only `status`, `stage`, the computed
+Korean `stage_label`, completed and total step counts, the current step
+ID/position/status when applicable, the bounded attempt number, a
+controller-authored message, `updated_at`, and the computed stage `scv_line`. A terminal snapshot may also contain a bounded
+`termination` object with its code, next action, step ID, and attempt. It never returns plan instructions, prompts, raw
 stdout/stderr, acceptance output, findings, evidence bodies, or environment
 values. The snapshot is read from an atomically replaced v1 index without taking
 the executor's exclusive run lock, and its task, plan, base, and workspace
@@ -131,13 +133,17 @@ The plan must trace back to the approved specification and include:
 
 Each step must be independently understandable by an execution worker. Avoid vague steps such as "update tests" or "fix related code".
 
-The submitted file must use this exact JSON v1 shape. The control plane injects and fingerprints `expected_base_sha` when it stores the approved candidate, so omit that field from the draft.
+New plans must use this exact JSON v2 shape. The control plane injects and fingerprints `expected_base_sha` when it stores the approved candidate, so omit that field from the draft. The executor continues to read v1 plans with their legacy three-attempt behavior, but the skill must not create new v1 plans.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "20260713-short-slug",
   "task": "Concise implementation outcome",
+  "loop_policy": {
+    "max_attempts": 2,
+    "detect_stagnation": true
+  },
   "steps": [
     {
       "id": "step-1",
@@ -155,7 +161,7 @@ The submitted file must use this exact JSON v1 shape. The control plane injects 
 }
 ```
 
-`timeout_seconds` and `final_acceptance` are optional. Every step needs at least one non-empty acceptance command. Do not put `git push` in any acceptance command. The ordered steps, not an undeclared dependency field, define execution order.
+`timeout_seconds` and `final_acceptance` are optional. `loop_policy.max_attempts` is the total attempt count and must be from 1 through 3. `detect_stagnation` must be a boolean; keep it `true` for the shallow profile. Every step needs at least one non-empty acceptance command. Do not put `git push` in any acceptance command. The ordered steps, not an undeclared dependency field, define execution order.
 
 The submit command uses the executor's exact validator before changing task state. Unknown keys, boolean or out-of-range timeouts, mismatched task IDs or base revisions, and unsafe publication commands are rejected before plan approval or worktree creation.
 
@@ -164,7 +170,9 @@ Acceptance and final-acceptance commands run through `codex sandbox` with a cont
 ## Failure behavior
 
 - Preserve full command, exit status, and stderr for failed acceptance checks.
-- Allow at most three persisted attempts per step. Exhaustion resumes at `PLANNING`, requires a materially revised and re-approved plan, and starts a new `runs/<plan-sha>/` evidence set without deleting the old one.
+- Allow only the attempt count approved in `loop_policy`, with a hard cap of three and a recommended shallow value of two. Budget exhaustion resumes at `PLANNING`, requires a materially revised and re-approved plan, and starts a new `runs/<plan-sha>/` evidence set without deleting the old one.
+- After each failed v2 attempt, derive a convergence fingerprint from the normalized failure signature, acceptance result vector, and authoritative workspace fingerprint. Stop with `stalled` for an identical consecutive fingerprint, `oscillating` when an older fingerprint recurs, and `verifier_disagreement` when the same verifier failure repeats without a workspace change. Fingerprinting must not invoke a model or rerun acceptance.
+- Persist a named termination and bounded next action. `budget_exhausted`, `stalled`, `oscillating`, and `verifier_disagreement` require a revised and re-approved plan before execution resumes.
 - Classify missing tools, invalid commands (including shell exit 126/127), stale base revisions, and state mismatches as blockers rather than implementation failures.
 - Do not consume a step attempt when Codex, the sandbox, or a required executable cannot be launched. Preserve the blocker and retry only after the environment is corrected.
 - Never silently change the approved plan to make execution pass.

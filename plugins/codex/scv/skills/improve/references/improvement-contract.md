@@ -8,7 +8,7 @@
 4. Run the Failure Analyst as an ephemeral, read-only Codex process.
 5. Keep failure evidence and analyst evidence in separately hashed directories.
 6. Redact secrets before analyst prompts or persistent learning records.
-7. Analyze one step/run/signature at most once and keep worker attempts capped at three.
+7. Analyze one step/run/signature at most once and keep worker attempts within the approved plan budget, always capped at three.
 8. Treat analyst failure as a degraded learning feature, not a new worker failure.
 9. Inject only `active` lessons, at most three, for an exact failure signature.
 10. Never let a lesson change approved scope, acceptance criteria, or controller policy.
