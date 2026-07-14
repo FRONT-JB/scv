@@ -653,6 +653,32 @@ class ExecutorTestCase(unittest.TestCase):
                     workspace=self.root,
                 )
 
+    def test_executor_rejects_symlinked_run_directory(self) -> None:
+        self.write_plan()
+        external_run = self.base / "external-run"
+        external_run.mkdir()
+        self.run_dir.parent.mkdir(parents=True)
+        self.run_dir.symlink_to(external_run, target_is_directory=True)
+
+        with self.assertRaisesRegex(execute.StateError, "실행 디렉터리"):
+            self.execute(FakeRunner(self.root, self.sha))
+
+        self.assertEqual(list(external_run.iterdir()), [])
+
+    def test_executor_rejects_symlinked_index_without_mutating_target(self) -> None:
+        self.write_plan()
+        self.run_dir.mkdir(parents=True)
+        external = self.base / "executor-external-index.json"
+        external.write_text('{"schema_version": 1}\n', encoding="utf-8")
+        before = external.read_bytes()
+        (self.run_dir / "index.json").symlink_to(external)
+
+        with self.assertRaisesRegex(execute.StateError, "실행 인덱스"):
+            self.execute(FakeRunner(self.root, self.sha))
+
+        self.assertEqual(external.read_bytes(), before)
+        self.assertFalse((self.run_dir / "evidence").exists())
+
     def test_executor_persists_worker_acceptance_verifier_and_final_progress(self) -> None:
         self.write_plan()
         runner = ProgressObservingRunner(self.root, self.sha, self.run_dir)

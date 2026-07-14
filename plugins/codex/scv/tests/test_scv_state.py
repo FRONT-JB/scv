@@ -6,6 +6,8 @@ from __future__ import annotations
 import io
 import json
 import multiprocessing
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -170,6 +172,97 @@ class TaskStateStoreTests(unittest.TestCase):
         created = self._create("safe.1")
         self.assertEqual(created["state"], State.NEW.value)
         self.assertTrue((expected / "safe.1" / "state.json").is_file())
+
+    def test_state_directories_and_files_are_private(self) -> None:
+        self._create("private-state")
+
+        for directory in (
+            self.store.state_root.parent,
+            self.store.state_root,
+            self.store.state_root / ".locks",
+            self.store.task_dir("private-state"),
+        ):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+        self.assertEqual(
+            stat.S_IMODE(self.store.state_path("private-state").stat().st_mode),
+            0o600,
+        )
+        self.assertEqual(
+            stat.S_IMODE(
+                (self.store.state_root / ".locks" / "private-state.lock").stat().st_mode
+            ),
+            0o600,
+        )
+
+    def test_explicit_symlinked_state_root_is_rejected(self) -> None:
+        external = self.root / "external-state"
+        external.mkdir()
+        linked_root = self.root / "linked-state"
+        linked_root.symlink_to(external, target_is_directory=True)
+
+        with self.assertRaisesRegex(scv_state.SCVStateError, "심볼릭 링크"):
+            TaskStateStore(repo=self.repo, state_root=linked_root)
+
+    def test_load_rejects_symlinked_task_directory_and_state_file(self) -> None:
+        self._create("state-boundary-seed")
+        external_directory = self.root / "external-task"
+        external_directory.mkdir()
+        self.store.task_dir("linked-task").symlink_to(
+            external_directory,
+            target_is_directory=True,
+        )
+
+        with self.assertRaisesRegex(CorruptState, "태스크 디렉터리"):
+            self.store.load("linked-task")
+
+        self._create("linked-state-file")
+        state_path = self.store.state_path("linked-state-file")
+        external_state = self.root / "external-state.json"
+        external_state.write_bytes(state_path.read_bytes())
+        state_path.unlink()
+        state_path.symlink_to(external_state)
+
+        with self.assertRaisesRegex(CorruptState, "읽을 수 없습니다"):
+            self.store.load("linked-state-file")
+
+    def test_create_rejects_symlinked_lock_without_touching_target(self) -> None:
+        self._create("lock-boundary-seed")
+        external_lock = self.root / "external.lock"
+        external_lock.write_text("unchanged", encoding="utf-8")
+        lock_path = self.store.state_root / ".locks" / "linked-lock.lock"
+        os.symlink(external_lock, lock_path)
+
+        with self.assertRaisesRegex(scv_state.SCVStateError, "잠금"):
+            self._create("linked-lock")
+
+        self.assertEqual(external_lock.read_text(encoding="utf-8"), "unchanged")
+        self.assertFalse(self.store.task_dir("linked-lock").exists())
+
+    def test_load_rejects_oversized_and_structurally_corrupt_records(self) -> None:
+        self._create("bounded-state")
+        path = self.store.state_path("bounded-state")
+        document = json.loads(path.read_text(encoding="utf-8"))
+
+        with mock.patch.object(scv_state, "MAX_STATE_BYTES", 32):
+            with self.assertRaisesRegex(CorruptState, "허용 크기"):
+                self.store.load("bounded-state")
+
+        document["schema_version"] = True
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(CorruptState, "schema_version"):
+            self.store.load("bounded-state")
+
+        document["schema_version"] = 1
+        document["revision"] = True
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(CorruptState, "양의 정수"):
+            self.store.load("bounded-state")
+
+        document["revision"] = 1
+        document["worktree"] = {"path": "/tmp/worktree", "branch": None}
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(CorruptState, "함께 기록"):
+            self.store.load("bounded-state")
 
     def test_linked_worktree_resolves_same_common_state(self) -> None:
         self._create("shared")

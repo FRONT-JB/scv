@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - direct script execution.
 
 
 SCHEMA_VERSION = 1
+MAX_STATE_BYTES = 8 * 1024 * 1024
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ARTIFACT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
@@ -268,12 +270,92 @@ class TaskStateStore:
         except RuntimeRequirementError as exc:
             raise SCVStateError(str(exc)) from exc
         self.repo = Path(repo or os.getcwd()).expanduser().resolve()
-        self.state_root = (
-            Path(state_root).expanduser().resolve()
-            if state_root is not None
-            else default_state_root(self.repo)
-        )
+        if state_root is None:
+            common_directory = discover_git_common_dir(self.repo)
+            self._state_parent: Optional[Path] = common_directory / "scv"
+            self.state_root = self._state_parent / "tasks"
+        else:
+            raw_root = Path(
+                os.path.abspath(os.fspath(Path(state_root).expanduser()))
+            )
+            if raw_root == raw_root.parent:
+                raise SCVStateError("파일시스템 루트는 SCV 상태 루트로 사용할 수 없습니다")
+            # Canonicalize existing parent links while preserving the final
+            # component so an explicit symlinked state root is never followed.
+            self.state_root = raw_root.parent.resolve() / raw_root.name
+            self._state_parent = None
+        if self.state_root.is_symlink():
+            raise SCVStateError("SCV 상태 루트에는 심볼릭 링크를 사용할 수 없습니다")
         self._clock = clock or _utc_now
+
+    @staticmethod
+    def _harden_directory(path: Path, label: str) -> None:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_DIRECTORY"):
+            flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor: Optional[int] = None
+        try:
+            descriptor = os.open(str(path), flags)
+            directory_stat = os.fstat(descriptor)
+            if not stat.S_ISDIR(directory_stat.st_mode):
+                raise SCVStateError("{}은(는) 디렉터리여야 합니다".format(label))
+            os.fchmod(descriptor, 0o700)
+        except OSError as exc:
+            raise SCVStateError(
+                "{}을(를) 안전하게 준비할 수 없습니다: {}".format(label, exc)
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    @classmethod
+    def _prepare_private_directory(
+        cls,
+        path: Path,
+        label: str,
+        *,
+        parents: bool = False,
+    ) -> None:
+        if path.is_symlink():
+            raise SCVStateError("{}에는 심볼릭 링크를 사용할 수 없습니다".format(label))
+        try:
+            path.mkdir(mode=0o700, parents=parents, exist_ok=True)
+        except OSError as exc:
+            raise SCVStateError(
+                "{}을(를) 준비할 수 없습니다: {}".format(label, exc)
+            ) from exc
+        cls._harden_directory(path, label)
+
+    def _prepare_state_root(self) -> None:
+        if self._state_parent is not None:
+            self._prepare_private_directory(
+                self._state_parent,
+                "SCV 상태 디렉터리",
+            )
+            self._prepare_private_directory(self.state_root, "SCV 상태 루트")
+            return
+        self._prepare_private_directory(
+            self.state_root,
+            "SCV 상태 루트",
+            parents=True,
+        )
+
+    def _state_root_available(self, *, missing_ok: bool) -> bool:
+        if self._state_parent is not None and self._state_parent.is_symlink():
+            raise CorruptState("SCV 상태 디렉터리에는 심볼릭 링크를 사용할 수 없습니다")
+        if self.state_root.is_symlink():
+            raise CorruptState("SCV 상태 루트에는 심볼릭 링크를 사용할 수 없습니다")
+        if not self.state_root.exists():
+            if missing_ok:
+                return False
+            raise TaskNotFound("SCV 상태 루트가 존재하지 않습니다")
+        if not self.state_root.is_dir():
+            raise CorruptState("SCV 상태 루트는 디렉터리여야 합니다")
+        return True
 
     def task_dir(self, task_id: str) -> Path:
         """Return the validated task directory without creating it."""
@@ -342,14 +424,20 @@ class TaskStateStore:
                 }
             ],
         }
+        self._validate_record(record, expected_task_id=task_id)
         directory = self.task_dir(task_id)
         with self._task_lock(task_id):
+            if directory.is_symlink():
+                raise SCVStateError(
+                    "태스크 디렉터리에는 심볼릭 링크를 사용할 수 없습니다"
+                )
             try:
-                directory.mkdir(parents=True, exist_ok=False)
+                directory.mkdir(mode=0o700, parents=False, exist_ok=False)
             except FileExistsError as exc:
                 raise TaskExists("태스크 {!r}가 이미 존재합니다".format(task_id)) from exc
 
             try:
+                self._harden_directory(directory, "태스크 디렉터리")
                 self._atomic_write(self.state_path(task_id), record)
             except BaseException:
                 # Creation owns the directory and can safely remove it when no
@@ -366,12 +454,44 @@ class TaskStateStore:
         """Load and validate the authoritative task record."""
 
         path = self.state_path(task_id)
+        self._state_root_available(missing_ok=False)
+        directory = path.parent
+        if directory.is_symlink():
+            raise CorruptState("태스크 디렉터리에는 심볼릭 링크를 사용할 수 없습니다")
+        if not directory.exists():
+            raise TaskNotFound("태스크 {!r}가 존재하지 않습니다".format(task_id))
+        if not directory.is_dir():
+            raise CorruptState("태스크 경로는 디렉터리여야 합니다: {}".format(directory))
+
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor: Optional[int] = None
         try:
-            with path.open("r", encoding="utf-8") as handle:
-                record = json.load(handle)
+            descriptor = os.open(str(path), flags)
         except FileNotFoundError as exc:
             raise TaskNotFound("태스크 {!r}가 존재하지 않습니다".format(task_id)) from exc
-        except (OSError, json.JSONDecodeError) as exc:
+        except OSError as exc:
+            raise CorruptState("{} 상태 파일을 읽을 수 없습니다: {}".format(path, exc)) from exc
+        try:
+            file_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                raise CorruptState("상태 파일은 단일 링크의 일반 파일이어야 합니다")
+            if file_stat.st_size > MAX_STATE_BYTES:
+                raise CorruptState("상태 파일이 허용 크기를 초과했습니다")
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                payload = handle.read(MAX_STATE_BYTES + 1)
+            if len(payload) > MAX_STATE_BYTES:
+                raise CorruptState("상태 파일이 허용 크기를 초과했습니다")
+        except OSError as exc:
+            raise CorruptState("{} 상태 파일을 읽을 수 없습니다: {}".format(path, exc)) from exc
+        finally:
+            os.close(descriptor)
+        try:
+            record = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CorruptState("{} 상태 파일을 읽을 수 없습니다: {}".format(path, exc)) from exc
         self._validate_record(record, expected_task_id=task_id)
         return copy.deepcopy(record)
@@ -683,11 +803,25 @@ class TaskStateStore:
     def list_tasks(self) -> List[Record]:
         """Return all task records sorted by task ID."""
 
-        if not self.state_root.exists():
+        if not self._state_root_available(missing_ok=True):
             return []
         records = []
-        for state_path in sorted(self.state_root.glob("*/state.json")):
-            records.append(self.load(state_path.parent.name))
+        for directory in sorted(
+            self.state_root.iterdir(), key=lambda item: item.name
+        ):
+            if directory.name == ".locks":
+                if directory.is_symlink() or not directory.is_dir():
+                    raise CorruptState("상태 잠금 경로는 일반 디렉터리여야 합니다")
+                continue
+            if not TASK_ID_PATTERN.fullmatch(directory.name):
+                continue
+            if directory.is_symlink() or not directory.is_dir():
+                raise CorruptState(
+                    "태스크 경로는 심볼릭 링크가 아닌 디렉터리여야 합니다: {}".format(
+                        directory
+                    )
+                )
+            records.append(self.load(directory.name))
         return records
 
     def _now(self) -> str:
@@ -734,16 +868,34 @@ class TaskStateStore:
         validate_task_id(task_id)
         lock_directory = self.state_root / ".locks"
         lock_path = lock_directory / "{}.lock".format(task_id)
+        descriptor: Optional[int] = None
         try:
-            lock_directory.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            self._prepare_state_root()
+            self._prepare_private_directory(lock_directory, "상태 잠금 디렉터리")
+            flags = os.O_CREAT | os.O_RDWR
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(str(lock_path), flags, 0o600)
+            lock_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+                raise SCVStateError("상태 잠금 파일은 단일 링크의 일반 파일이어야 합니다")
+            os.fchmod(descriptor, 0o600)
+        except SCVStateError:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise
         except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
             raise SCVStateError(
                 "태스크 {!r}의 상태 잠금 파일을 준비할 수 없습니다: {}".format(
                     task_id, exc
                 )
             ) from exc
 
+        assert descriptor is not None
         try:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -832,7 +984,10 @@ class TaskStateStore:
     def _validate_record(record: Any, *, expected_task_id: str) -> None:
         if not isinstance(record, dict):
             raise CorruptState("상태 레코드는 JSON 객체여야 합니다")
-        if record.get("schema_version") != SCHEMA_VERSION:
+        if (
+            type(record.get("schema_version")) is not int
+            or record["schema_version"] != SCHEMA_VERSION
+        ):
             raise CorruptState("schema_version이 없거나 지원되지 않습니다")
         if record.get("task_id") != expected_task_id:
             raise CorruptState("상태의 task_id가 디렉터리 이름과 일치하지 않습니다")
@@ -843,7 +998,7 @@ class TaskStateStore:
             State(record.get("state"))
         except (TypeError, ValueError) as exc:
             raise CorruptState("상태 레코드의 생명주기 상태가 올바르지 않습니다") from exc
-        if not isinstance(record.get("revision"), int) or record["revision"] < 1:
+        if type(record.get("revision")) is not int or record["revision"] < 1:
             raise CorruptState("상태 revision은 양의 정수여야 합니다")
         base = record.get("base")
         if not isinstance(base, dict) or set(base) != {"branch", "sha"}:
@@ -853,21 +1008,92 @@ class TaskStateStore:
             _validate_sha(base["sha"])
         except ValueError as exc:
             raise CorruptState(str(exc)) from exc
-        if not isinstance(record.get("artifacts"), dict):
+        artifacts = record.get("artifacts")
+        if not isinstance(artifacts, dict):
             raise CorruptState("artifacts는 JSON 객체여야 합니다")
-        if not isinstance(record.get("worktree"), dict):
-            raise CorruptState("worktree는 JSON 객체여야 합니다")
-        if not isinstance(record.get("timestamps"), dict):
+        try:
+            for name, value in artifacts.items():
+                TaskStateStore._validate_artifact(name, value)
+        except ValueError as exc:
+            raise CorruptState(str(exc)) from exc
+        worktree = record.get("worktree")
+        if not isinstance(worktree, dict) or set(worktree) != {"path", "branch"}:
+            raise CorruptState("worktree 정보가 올바르지 않습니다")
+        worktree_path = worktree["path"]
+        worktree_branch = worktree["branch"]
+        if (worktree_path is None) != (worktree_branch is None):
+            raise CorruptState("worktree 경로와 브랜치는 함께 기록되어야 합니다")
+        if worktree_path is not None:
+            try:
+                _validate_text(worktree_path, "워크트리 경로", max_length=4096)
+                _validate_text(worktree_branch, "워크트리 브랜치", max_length=255)
+            except ValueError as exc:
+                raise CorruptState(str(exc)) from exc
+        timestamps = record.get("timestamps")
+        required_timestamps = {
+            "created_at",
+            "updated_at",
+            "state_entered_at",
+            "state_entries",
+            "ready_at",
+            "abandoned_at",
+        }
+        if not isinstance(timestamps, dict) or not required_timestamps.issubset(
+            timestamps
+        ):
             raise CorruptState("timestamps는 JSON 객체여야 합니다")
-        if not isinstance(record.get("history"), list):
+        try:
+            for name in ("created_at", "updated_at", "state_entered_at"):
+                _validate_text(timestamps[name], name, max_length=128)
+            for name in ("ready_at", "abandoned_at"):
+                if timestamps[name] is not None:
+                    _validate_text(timestamps[name], name, max_length=128)
+        except ValueError as exc:
+            raise CorruptState(str(exc)) from exc
+        state_entries = timestamps["state_entries"]
+        if not isinstance(state_entries, dict) or record["state"] not in state_entries:
+            raise CorruptState("timestamps.state_entries가 올바르지 않습니다")
+        try:
+            for state_name, entered_at in state_entries.items():
+                State(state_name)
+                _validate_text(entered_at, "상태 진입 시각", max_length=128)
+        except (TypeError, ValueError) as exc:
+            raise CorruptState("timestamps.state_entries가 올바르지 않습니다") from exc
+        history = record.get("history")
+        if not isinstance(history, list) or not history:
             raise CorruptState("history는 JSON 배열이어야 합니다")
+        try:
+            for event in history:
+                if not isinstance(event, dict):
+                    raise ValueError("history 항목은 JSON 객체여야 합니다")
+                _validate_text(event.get("at"), "history.at", max_length=128)
+                _validate_text(event.get("event"), "history.event", max_length=64)
+        except ValueError as exc:
+            raise CorruptState(str(exc)) from exc
         resume = record.get("resume")
         if resume is not None:
-            if not isinstance(resume, dict):
+            required_resume = {
+                "blocked_from",
+                "resume_from",
+                "reason",
+                "blocked_at",
+                "resumed_at",
+            }
+            if not isinstance(resume, dict) or not required_resume.issubset(resume):
                 raise CorruptState("resume은 JSON 객체 또는 null이어야 합니다")
             try:
                 blocked_from = State(resume.get("blocked_from"))
                 resume_from = State(resume.get("resume_from"))
+                _validate_text(resume.get("reason"), "resume.reason")
+                _validate_text(
+                    resume.get("blocked_at"), "resume.blocked_at", max_length=128
+                )
+                if resume.get("resumed_at") is not None:
+                    _validate_text(
+                        resume.get("resumed_at"),
+                        "resume.resumed_at",
+                        max_length=128,
+                    )
             except (TypeError, ValueError) as exc:
                 raise CorruptState("resume의 상태 정보가 올바르지 않습니다") from exc
             if (
@@ -880,7 +1106,8 @@ class TaskStateStore:
 
     @staticmethod
     def _atomic_write(path: Path, record: Record) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.parent.is_symlink() or not path.parent.is_dir():
+            raise SCVStateError("상태 파일의 상위 경로는 일반 디렉터리여야 합니다")
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=".state.", suffix=".tmp", dir=str(path.parent)
         )

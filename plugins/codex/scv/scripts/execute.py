@@ -724,6 +724,19 @@ def atomic_write_json(path: Path, content: Any) -> None:
     atomic_write_text(path, payload)
 
 
+def _resolve_run_directory(
+    run_dir: Path,
+    *,
+    error_type: type[ExecutorError] = StateError,
+) -> Path:
+    """Resolve a run path without following a final symlink component."""
+
+    raw_root = Path(os.path.abspath(os.fspath(Path(run_dir).expanduser())))
+    if raw_root.is_symlink():
+        raise error_type("실행 디렉터리에는 심볼릭 링크를 사용할 수 없습니다")
+    return raw_root.parent.resolve() / raw_root.name
+
+
 def _read_index_snapshot(
     root: Path, *, max_bytes: int | None = None
 ) -> dict[str, Any]:
@@ -744,11 +757,11 @@ def _read_index_snapshot(
         if not stat.S_ISREG(file_stat.st_mode):
             raise StateError("실행 인덱스는 일반 파일이어야 합니다")
         if max_bytes is not None and file_stat.st_size > max_bytes:
-            raise StateError("실행 인덱스가 진행 조회 허용 크기를 초과했습니다")
+            raise StateError("실행 인덱스가 허용 크기를 초과했습니다")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             payload = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
         if max_bytes is not None and len(payload) > max_bytes:
-            raise StateError("실행 인덱스가 진행 조회 허용 크기를 초과했습니다")
+            raise StateError("실행 인덱스가 허용 크기를 초과했습니다")
     except OSError as exc:
         raise StateError(f"{index_path}을(를) 읽을 수 없습니다: {exc}") from exc
     finally:
@@ -757,7 +770,11 @@ def _read_index_snapshot(
         value = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise StateError(f"{index_path}을(를) 읽을 수 없습니다: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
+    if (
+        not isinstance(value, dict)
+        or type(value.get("schema_version")) is not int
+        or value["schema_version"] != 1
+    ):
         raise StateError("실행 인덱스의 스키마를 지원하지 않습니다")
     return value
 
@@ -906,7 +923,10 @@ def _progress_message(stage: str, step_id: str | None, attempt: int | None) -> s
 def summarize_execution_progress(index: Mapping[str, Any]) -> dict[str, Any]:
     """Return a bounded, presentation-safe summary of a v1 execution index."""
 
-    if index.get("schema_version") != 1:
+    if (
+        type(index.get("schema_version")) is not int
+        or index["schema_version"] != 1
+    ):
         raise StateError("실행 인덱스의 스키마를 지원하지 않습니다")
     status = index.get("status")
     if status not in EXECUTION_STATUSES:
@@ -947,7 +967,7 @@ def read_progress(
 ) -> dict[str, Any]:
     """Read sanitized live progress without contending with the executor lock."""
 
-    root = run_dir.resolve()
+    root = _resolve_run_directory(run_dir)
     index = _read_index_snapshot(root, max_bytes=MAX_PROGRESS_INDEX_BYTES)
     bindings = {
         "task_id": task_id,
@@ -970,7 +990,7 @@ def run_directory_lock(run_dir: Path) -> Iterator[None]:
         raise InfrastructureBlocker(str(exc)) from exc
     if fcntl is None:  # pragma: no cover - macOS에는 항상 존재합니다.
         raise InfrastructureBlocker("SCV 실행 잠금은 macOS에서만 사용할 수 있습니다")
-    root = run_dir.resolve()
+    root = _resolve_run_directory(run_dir, error_type=InfrastructureBlocker)
     descriptor: int | None = None
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -1632,7 +1652,7 @@ class StepExecutor:
             raise StateError(f"timeout은 1~{MAX_TIMEOUT_SECONDS}초 범위여야 합니다")
         self.plan = plan
         self.root = root.resolve()
-        self.run_dir = run_dir.resolve()
+        self.run_dir = _resolve_run_directory(run_dir)
         self.index_path = self.run_dir / "index.json"
         self.evidence_root = self.run_dir / "evidence"
         self.codex_binary = codex_binary
@@ -1990,6 +2010,8 @@ class StepExecutor:
             )
 
     def _load_or_initialize_index(self) -> dict[str, Any]:
+        if self.index_path.is_symlink():
+            raise StateError("실행 인덱스에는 심볼릭 링크를 사용할 수 없습니다")
         if not self.index_path.exists():
             current_head = self._git_head()
             expected = self.plan.expected_base_sha or current_head
@@ -2035,12 +2057,10 @@ class StepExecutor:
             self._save_index()
             return index
 
-        try:
-            index = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise StateError(f"실행 인덱스를 읽을 수 없습니다: {exc}") from exc
-        if not isinstance(index, dict) or index.get("schema_version") != 1:
-            raise StateError("실행 인덱스의 스키마를 지원하지 않습니다")
+        index = _read_index_snapshot(
+            self.run_dir,
+            max_bytes=MAX_PROGRESS_INDEX_BYTES,
+        )
         comparisons = {
             "task_id": self.plan.task_id,
             "plan_sha256": self.plan.sha256,
@@ -3641,7 +3661,7 @@ def _read_status_unlocked(root: Path) -> dict[str, Any]:
 def locked_status(run_dir: Path) -> Iterator[dict[str, Any]]:
     """Hold the run lock while a consumer uses validated execution evidence."""
 
-    root = run_dir.resolve()
+    root = _resolve_run_directory(run_dir)
     with run_directory_lock(root):
         yield _read_status_unlocked(root)
 

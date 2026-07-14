@@ -484,7 +484,10 @@ class LearningStore:
         body = {key: value for key, value in document.items() if key != "observation_id"}
         if _digest(b"scv-observation-v1", body) != identifier:
             raise LearningError("관찰 내용의 무결성 검증에 실패했습니다")
-        if document.get("schema_version") != SCHEMA_VERSION:
+        if (
+            type(document.get("schema_version")) is not int
+            or document["schema_version"] != SCHEMA_VERSION
+        ):
             raise LearningError("지원하지 않는 관찰 스키마입니다")
         return document
 
@@ -536,7 +539,10 @@ class LearningStore:
         return document
 
     def _validate_lesson(self, value: Mapping[str, Any], expected_id: str) -> dict[str, Any]:
-        if value.get("schema_version") != SCHEMA_VERSION:
+        if (
+            type(value.get("schema_version")) is not int
+            or value["schema_version"] != SCHEMA_VERSION
+        ):
             raise LearningError("지원하지 않는 lesson 스키마입니다")
         if value.get("lesson_id") != expected_id:
             raise LearningError("lesson 파일 이름과 내부 ID가 일치하지 않습니다")
@@ -748,7 +754,10 @@ class LearningStore:
     def _validate_proposal(
         self, value: Mapping[str, Any], expected_id: str
     ) -> dict[str, Any]:
-        if value.get("schema_version") != SCHEMA_VERSION:
+        if (
+            type(value.get("schema_version")) is not int
+            or value["schema_version"] != SCHEMA_VERSION
+        ):
             raise LearningError("지원하지 않는 개선 제안 스키마입니다")
         if value.get("proposal_id") != expected_id:
             raise LearningError("개선 제안 파일 이름과 내부 ID가 일치하지 않습니다")
