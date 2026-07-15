@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -53,6 +54,8 @@ class FakeRunner:
         self.change_head_after_worker: str | None = None
         self.codex_version_behavior: object = 0
         self.sandbox_preflight_behavior: object = 0
+        self.package_manager_version_behavior: object = "9.15.4"
+        self.package_manager_probes: list[list[str]] = []
         self.codex_home_snapshots: list[dict[str, object]] = []
 
     @staticmethod
@@ -86,6 +89,17 @@ class FakeRunner:
         if environment and environment.get("CODEX_HOME"):
             home = Path(environment["CODEX_HOME"])
             entries = sorted(path.name for path in home.iterdir())
+            path_entries = environment.get("PATH", "").split(os.pathsep)
+            wrapper_root = Path(path_entries[0]) if path_entries[0] else None
+            package_manager_wrappers: dict[str, dict[str, object]] = {}
+            if wrapper_root is not None:
+                for name in ("npm", "pnpm", "yarn", "bun"):
+                    wrapper = wrapper_root / name
+                    if wrapper.is_file():
+                        package_manager_wrappers[name] = {
+                            "content": wrapper.read_text(encoding="utf-8"),
+                            "mode": stat.S_IMODE(wrapper.stat().st_mode),
+                        }
             self.codex_home_snapshots.append(
                 {
                     "argv": argv,
@@ -93,6 +107,12 @@ class FakeRunner:
                     "entries": entries,
                     "mode": stat.S_IMODE(home.stat().st_mode),
                     "home_environment": environment.get("HOME"),
+                    "home_environment_mode": (
+                        stat.S_IMODE(Path(environment["HOME"]).stat().st_mode)
+                        if environment.get("HOME")
+                        and Path(environment["HOME"]).is_dir()
+                        else None
+                    ),
                     "auth_is_symlink": (home / "auth.json").is_symlink(),
                     "auth_target": (
                         os.readlink(home / "auth.json")
@@ -109,6 +129,18 @@ class FakeRunner:
                         name: environment.get(name)
                         for name in ("TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME")
                     },
+                    "package_manager_environment": {
+                        name: environment.get(name)
+                        for name in (
+                            "COREPACK_ENABLE_DOWNLOAD_PROMPT",
+                            "COREPACK_ENABLE_NETWORK",
+                            "COREPACK_ENABLE_PROJECT_SPEC",
+                            "npm_config_manage_package_manager_versions",
+                            "npm_config_offline",
+                        )
+                    },
+                    "package_manager_wrappers": package_manager_wrappers,
+                    "path_environment": environment.get("PATH"),
                     "credential_environment": {
                         name: environment.get(name)
                         for name in (
@@ -143,6 +175,22 @@ class FakeRunner:
             return self._result(argv, stdout=str(self.root) + "\n")
         if argv[:3] == ["git", "rev-parse", "HEAD"]:
             return self._result(argv, stdout=self.sha + "\n")
+        if argv[:3] == ["git", "worktree", "list"]:
+            if (Path(cwd) / ".git").exists():
+                completed = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                return self._result(
+                    argv,
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                )
+            return self._result(argv, stdout=f"worktree {self.root}\0")
         if argv[:2] == ["git", "status"]:
             return self._result(argv, stdout=" M src/example.py\n")
         if argv[:2] == ["git", "diff"]:
@@ -171,6 +219,26 @@ class FakeRunner:
                 stdout="-P --sandbox-state-disable-network -C\n",
             )
         if len(argv) >= 2 and argv[1] == "sandbox":
+            separator = argv.index("--") if "--" in argv else -1
+            sandbox_command = argv[separator + 1 :] if separator >= 0 else []
+            if (
+                len(sandbox_command) == 2
+                and Path(sandbox_command[0]).name in {"npm", "pnpm", "yarn", "bun"}
+                and sandbox_command[1] == "--version"
+            ):
+                self.package_manager_probes.append(sandbox_command)
+                behavior = self.package_manager_version_behavior
+                if isinstance(behavior, BaseException):
+                    raise behavior
+                if isinstance(behavior, tuple):
+                    returncode, stdout, stderr = behavior
+                    return self._result(
+                        argv,
+                        returncode=int(returncode),
+                        stdout=str(stdout),
+                        stderr=str(stderr),
+                    )
+                return self._result(argv, stdout=str(behavior) + "\n")
             shell_command = argv[argv.index("-lc") + 1]
             if shell_command == ":":
                 behavior = self.sandbox_preflight_behavior
@@ -324,6 +392,14 @@ class ExecutorTestCase(unittest.TestCase):
             for position, value in enumerate(argv[:-1])
             if value == "-c"
         ]
+
+    def install_fake_package_manager(self, name: str = "pnpm") -> Path:
+        fake_bin = self.base / f"fake-{name}-bin"
+        fake_bin.mkdir()
+        executable = fake_bin / name
+        executable.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        executable.chmod(0o755)
+        return executable
 
     def acceptance_calls(self, runner: FakeRunner) -> list[dict[str, object]]:
         return [
@@ -1768,7 +1844,7 @@ class ExecutorTestCase(unittest.TestCase):
         self.assertNotIn("push", flattened)
         self.assertNotIn("reset", flattened)
 
-    def test_interrupted_attempt_is_consumed_and_resume_uses_next_attempt(self) -> None:
+    def test_interrupted_acceptance_becomes_non_consuming_controller_blocker(self) -> None:
         self.write_plan()
         plan = execute.load_plan(self.plan_path)
         self.run_dir.mkdir(parents=True)
@@ -1808,9 +1884,12 @@ class ExecutorTestCase(unittest.TestCase):
         outcome = self.execute(runner)
 
         self.assertTrue(outcome.ready)
-        attempts = self.read_index()["steps"][0]["attempts"]
-        self.assertEqual([attempt["status"] for attempt in attempts], ["interrupted", "passed"])
-        self.assertEqual(attempts[1]["number"], 2)
+        step = self.read_index()["steps"][0]
+        self.assertEqual([attempt["status"] for attempt in step["attempts"]], ["passed"])
+        self.assertEqual(step["attempts"][0]["number"], 1)
+        self.assertEqual(1, len(step["blockers"]))
+        self.assertEqual("controller", step["blockers"][0]["failure"]["stage"])
+        self.assertIn("attempt-1-run-2", step["attempts"][0]["evidence"])
 
     def test_plan_change_cannot_reuse_existing_state(self) -> None:
         self.write_plan()
@@ -1907,11 +1986,74 @@ class ExecutorTestCase(unittest.TestCase):
 
     def test_acceptance_and_nested_codex_use_minimal_temporary_homes(self) -> None:
         self.write_plan()
-        git_common = self.base / "repository.git"
-        git_dir = git_common / "worktrees" / "worktree"
-        git_dir.mkdir(parents=True)
-        (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
-        (self.root / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+        primary = self.base / "primary-worktree"
+        primary.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=primary,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (primary / "tracked.txt").write_text("fixture\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "tracked.txt"],
+            cwd=primary,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=SCV Test",
+                "-c",
+                "user.email=scv@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+            cwd=primary,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        linked = self.base / "linked-worktree"
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(linked), "HEAD"],
+            cwd=primary,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.root = linked
+        git_common_value = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=primary,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        git_common = (primary / git_common_value).resolve()
+        git_dir_value = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=linked,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        git_dir_path = Path(git_dir_value)
+        git_dir = (
+            git_dir_path
+            if git_dir_path.is_absolute()
+            else linked / git_dir_path
+        ).resolve()
+        self.run_dir = git_common / "scv" / "tasks" / "task-1" / "runs" / "run-1"
+        hostile_temp = git_common / "host-controlled-tmp"
+        hostile_temp.mkdir()
         user_home = self.base / "user-codex"
         user_home.mkdir()
         (user_home / "AGENTS.md").write_text("사용자 지침", encoding="utf-8")
@@ -1946,7 +2088,8 @@ class ExecutorTestCase(unittest.TestCase):
             "GIT_ASKPASS": "/secrets/askpass",
         }
         with mock.patch.dict(os.environ, credentials):
-            outcome = self.execute(runner)
+            with mock.patch.object(execute.tempfile, "tempdir", str(hostile_temp)):
+                outcome = self.execute(runner)
 
         self.assertTrue(outcome.ready)
         nested = [
@@ -2098,7 +2241,11 @@ class ExecutorTestCase(unittest.TestCase):
             self.assertEqual(1, len(temporary_paths))
             scratch = Path(temporary_paths.pop())
             self.assertEqual(str(scratch), snapshot["home_environment"])
-            self.assertIn(self.run_dir.resolve(), scratch.parents)
+            self.assertEqual(0o700, snapshot["home_environment_mode"])
+            self.assertNotIn(primary.resolve(), scratch.parents)
+            self.assertNotIn(self.root.resolve(), scratch.parents)
+            self.assertNotIn(git_dir.resolve(), scratch.parents)
+            self.assertNotIn(git_common.resolve(), scratch.parents)
             self.assertIn(json.dumps(str(scratch), ensure_ascii=False), config)
             self.assertTrue(
                 all(value is None for value in snapshot["credential_environment"].values())
@@ -2119,6 +2266,122 @@ class ExecutorTestCase(unittest.TestCase):
             )
             self.assertFalse(scratch.exists())
             self.assertFalse(Path(snapshot["path"]).exists())
+
+    def test_exact_pinned_package_manager_is_verified_once_and_wrapped(self) -> None:
+        self.write_plan()
+        (self.root / "package.json").write_text(
+            json.dumps({"packageManager": "pnpm@9.15.4"}),
+            encoding="utf-8",
+        )
+        executable = self.install_fake_package_manager()
+        runner = FakeRunner(self.root, self.sha)
+        runner.package_manager_version_behavior = "9.15.4"
+
+        with mock.patch.dict(os.environ, {"PATH": str(executable.parent)}):
+            outcome = self.execute(runner)
+
+        self.assertTrue(outcome.ready)
+        self.assertEqual(1, len(runner.package_manager_probes))
+        wrapped = [
+            snapshot
+            for snapshot in runner.codex_home_snapshots
+            if "pnpm" in snapshot["package_manager_wrappers"]
+            and Path(snapshot["path_environment"].split(os.pathsep)[0]).name == "bin"
+        ]
+        self.assertGreaterEqual(len(wrapped), 3)
+        for snapshot in wrapped:
+            wrapper = snapshot["package_manager_wrappers"]["pnpm"]
+            self.assertEqual(0o700, wrapper["mode"])
+            self.assertIn(str(executable.resolve()), wrapper["content"])
+            self.assertEqual(
+                {
+                    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+                    "COREPACK_ENABLE_NETWORK": "0",
+                    "COREPACK_ENABLE_PROJECT_SPEC": "0",
+                    "npm_config_manage_package_manager_versions": "false",
+                    "npm_config_offline": "true",
+                },
+                snapshot["package_manager_environment"],
+            )
+            wrapper_parent = Path(snapshot["path_environment"].split(os.pathsep)[0])
+            self.assertEqual("bin", wrapper_parent.name)
+            self.assertFalse(wrapper_parent.parent.exists())
+
+    def test_pinned_package_manager_mismatch_blocks_before_worker_and_attempt(self) -> None:
+        self.write_plan()
+        (self.root / "package.json").write_text(
+            json.dumps({"packageManager": "pnpm@9.15.4"}),
+            encoding="utf-8",
+        )
+        executable = self.install_fake_package_manager()
+        runner = FakeRunner(self.root, self.sha)
+        runner.package_manager_version_behavior = "10.33.0"
+
+        with mock.patch.dict(os.environ, {"PATH": str(executable.parent)}):
+            outcome = self.execute(runner)
+
+        self.assertEqual("blocked", outcome.status)
+        self.assertEqual(1, len(runner.package_manager_probes))
+        self.assertEqual([], self.codex_calls(runner))
+        self.assertEqual([], self.read_index()["steps"][0]["attempts"])
+        self.assertIn("pnpm@9.15.4", self.read_index()["reason"])
+        probe = next(
+            call
+            for call in runner.calls
+            if call["argv"][1:2] == ["sandbox"]
+            and "--" in call["argv"]
+            and call["argv"][call["argv"].index("--") + 1 :][-1:] == ["--version"]
+        )
+        self.assertEqual(
+            "false",
+            probe["env"]["npm_config_manage_package_manager_versions"],
+        )
+        self.assertEqual(
+            execute.PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS,
+            probe["timeout"],
+        )
+        self.assertLess(probe["timeout"], execute.DEFAULT_TIMEOUT_SECONDS)
+
+    def test_missing_pinned_package_manager_blocks_without_probe_or_worker(self) -> None:
+        self.write_plan()
+        (self.root / "package.json").write_text(
+            json.dumps({"packageManager": "pnpm@9.15.4"}),
+            encoding="utf-8",
+        )
+        empty_bin = self.base / "empty-bin"
+        empty_bin.mkdir()
+        runner = FakeRunner(self.root, self.sha)
+
+        with mock.patch.dict(os.environ, {"PATH": str(empty_bin)}):
+            outcome = self.execute(runner)
+
+        self.assertEqual("blocked", outcome.status)
+        self.assertEqual([], runner.package_manager_probes)
+        self.assertEqual([], self.codex_calls(runner))
+        self.assertEqual([], self.read_index()["steps"][0]["attempts"])
+
+    def test_package_manager_probe_failure_is_non_consuming_blocker(self) -> None:
+        self.write_plan()
+        (self.root / "package.json").write_text(
+            json.dumps({"packageManager": "pnpm@9.15.4"}),
+            encoding="utf-8",
+        )
+        executable = self.install_fake_package_manager()
+        runner = FakeRunner(self.root, self.sha)
+        runner.package_manager_version_behavior = (
+            1,
+            "",
+            "network disabled while attempting bootstrap",
+        )
+
+        with mock.patch.dict(os.environ, {"PATH": str(executable.parent)}):
+            outcome = self.execute(runner)
+
+        self.assertEqual("blocked", outcome.status)
+        self.assertEqual(1, len(runner.package_manager_probes))
+        self.assertEqual([], self.codex_calls(runner))
+        self.assertEqual([], self.read_index()["steps"][0]["attempts"])
+        self.assertIn("bootstrap", self.read_index()["reason"])
 
     def test_api_key_only_auth_is_parent_only_and_shell_excluded(self) -> None:
         self.write_plan()
@@ -2256,7 +2519,7 @@ class ExecutorTestCase(unittest.TestCase):
         self.assertEqual(["passed"], [attempt["status"] for attempt in attempts])
         self.assertEqual("launched", attempts[0]["worker_launch"]["status"])
 
-    def test_crash_after_worker_launch_marker_consumes_attempt(self) -> None:
+    def test_crash_after_worker_launch_marker_does_not_consume_attempt(self) -> None:
         self.write_plan()
         first_runner = FakeRunner(self.root, self.sha)
 
@@ -2275,12 +2538,11 @@ class ExecutorTestCase(unittest.TestCase):
         outcome = self.execute(FakeRunner(self.root, self.sha))
 
         self.assertTrue(outcome.ready)
-        attempts = self.read_index()["steps"][0]["attempts"]
-        self.assertEqual([1, 2], [attempt["number"] for attempt in attempts])
-        self.assertEqual(
-            ["interrupted", "passed"],
-            [attempt["status"] for attempt in attempts],
-        )
+        step = self.read_index()["steps"][0]
+        self.assertEqual([1], [attempt["number"] for attempt in step["attempts"]])
+        self.assertEqual(["passed"], [attempt["status"] for attempt in step["attempts"]])
+        self.assertEqual(1, len(step["blockers"]))
+        self.assertEqual("controller", step["blockers"][0]["failure"]["stage"])
 
     def test_missing_sandbox_start_marker_is_a_non_consuming_blocker(self) -> None:
         self.write_plan()
@@ -2412,43 +2674,94 @@ class ExecutorTestCase(unittest.TestCase):
 class CommandRunnerTest(unittest.TestCase):
     def test_subprocess_is_non_shell_and_captured(self) -> None:
         process = mock.Mock()
-        process.communicate.return_value = ("ok", "")
+        process.wait.return_value = 0
         process.returncode = 0
-        with mock.patch.object(execute.subprocess, "Popen", return_value=process) as popen:
-            result = execute.CommandRunner().run(
-                ["tool", "arg"],
-                cwd=Path.cwd(),
-                timeout_seconds=12,
-                input_text="prompt",
-                env={"SAFE": "1"},
-            )
+        captured: dict[str, bytes] = {}
+
+        def start_process(argv, **kwargs):
+            captured["stdin"] = kwargs["stdin"].read()
+            kwargs["stdout"].write(b"ok")
+            kwargs["stdout"].flush()
+            process.pid = 1234
+            return process
+
+        with mock.patch.object(execute.subprocess, "Popen", side_effect=start_process) as popen:
+            with mock.patch.object(
+                execute.os,
+                "killpg",
+                side_effect=ProcessLookupError,
+            ):
+                result = execute.CommandRunner().run(
+                    ["tool", "arg"],
+                    cwd=Path.cwd(),
+                    timeout_seconds=12,
+                    input_text="prompt",
+                    env={"SAFE": "1"},
+                )
 
         self.assertEqual(result.returncode, 0)
-        popen.assert_called_once_with(
-            ["tool", "arg"],
-            cwd=str(Path.cwd()),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env={"SAFE": "1"},
-            start_new_session=True,
-        )
-        process.communicate.assert_called_once_with(input="prompt", timeout=12)
+        self.assertEqual("ok", result.stdout)
+        self.assertEqual(b"prompt", captured["stdin"])
+        self.assertEqual(["tool", "arg"], popen.call_args.args[0])
+        options = popen.call_args.kwargs
+        self.assertEqual(str(Path.cwd()), options["cwd"])
+        self.assertFalse(options["text"])
+        self.assertEqual({"SAFE": "1"}, options["env"])
+        self.assertTrue(options["start_new_session"])
+        self.assertNotEqual(subprocess.PIPE, options["stdout"])
+        self.assertNotEqual(subprocess.PIPE, options["stderr"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX 프로세스 그룹 동작을 검증합니다")
+    def test_normal_leader_exit_kills_one_remaining_background_child(self) -> None:
+        child_pid: int | None = None
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "descendant-survived"
+            child_code = (
+                "import pathlib,sys,time; "
+                "time.sleep(0.4); "
+                "pathlib.Path(sys.argv[1]).write_text('alive', encoding='utf-8'); "
+                "time.sleep(30)"
+            )
+            parent_code = (
+                "import subprocess,sys; "
+                "child=subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); "
+                "print(child.pid, flush=True)"
+            )
+            try:
+                result = execute.CommandRunner().run(
+                    [sys.executable, "-c", parent_code, child_code, str(marker)],
+                    cwd=Path.cwd(),
+                    timeout_seconds=5,
+                )
+                child_pid = int(result.stdout.strip())
+                time.sleep(0.7)
+                self.assertFalse(marker.exists())
+            finally:
+                if child_pid is not None:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     @unittest.skipUnless(os.name == "posix", "POSIX 프로세스 그룹 동작을 검증합니다")
     def test_subprocess_timeout_kills_the_whole_process_group(self) -> None:
-        timeout = subprocess.TimeoutExpired(["tool"], 3, output=b"partial", stderr=b"late")
         process = mock.Mock()
         process.pid = 4321
         process.poll.return_value = None
-        process.communicate.side_effect = [timeout, ("partial", "late")]
-        with mock.patch.object(execute.subprocess, "Popen", return_value=process):
+        process.wait.return_value = 0
+
+        def start_process(argv, **kwargs):
+            kwargs["stdout"].write(b"partial")
+            kwargs["stderr"].write(b"late")
+            return process
+
+        with mock.patch.object(execute.subprocess, "Popen", side_effect=start_process):
             with mock.patch.object(execute.os, "killpg") as killpg:
-                with self.assertRaises(execute.CommandTimeout) as raised:
-                    execute.CommandRunner().run(
-                        ["tool"], cwd=Path.cwd(), timeout_seconds=3
-                    )
+                with mock.patch.object(execute.time, "monotonic", side_effect=[0, 4]):
+                    with self.assertRaises(execute.CommandTimeout) as raised:
+                        execute.CommandRunner().run(
+                            ["tool"], cwd=Path.cwd(), timeout_seconds=3
+                        )
         killpg.assert_called_once_with(4321, signal.SIGKILL)
         process.kill.assert_not_called()
         self.assertEqual(raised.exception.stdout, "partial")
@@ -2459,7 +2772,7 @@ class CommandRunnerTest(unittest.TestCase):
         process = mock.Mock()
         process.pid = 9876
         process.poll.return_value = None
-        process.communicate.side_effect = [KeyboardInterrupt(), ("", "")]
+        process.wait.side_effect = [KeyboardInterrupt(), 0]
         with mock.patch.object(execute.subprocess, "Popen", return_value=process):
             with mock.patch.object(execute.os, "killpg") as killpg:
                 with self.assertRaises(execute.CommandCancelled):
@@ -2470,30 +2783,59 @@ class CommandRunnerTest(unittest.TestCase):
         process.kill.assert_not_called()
 
     @unittest.skipUnless(os.name == "posix", "POSIX 프로세스 그룹 동작을 검증합니다")
+    def test_output_limit_kills_process_group_without_large_memory_capture(self) -> None:
+        real_killpg = os.killpg
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "import sys,time; "
+                "sys.stdout.write('x' * 128); sys.stdout.flush(); time.sleep(30)"
+            ),
+        ]
+
+        with mock.patch.object(execute.os, "killpg", side_effect=real_killpg) as killpg:
+            with self.assertRaises(execute.CommandOutputLimit) as raised:
+                execute.CommandRunner().run(
+                    command,
+                    cwd=Path.cwd(),
+                    timeout_seconds=5,
+                    output_limit_bytes=64,
+                )
+
+        killpg.assert_called()
+        self.assertLessEqual(len(raised.exception.stdout.encode("utf-8")), 64)
+        self.assertIn("64", str(raised.exception))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX 프로세스 그룹 동작을 검증합니다")
     def test_timeout_kills_group_and_bounds_cleanup_after_leader_exits(self) -> None:
-        initial = subprocess.TimeoutExpired(
-            ["tool"], 3, output=b"initial", stderr=b"initial-error"
-        )
-        first_cleanup = subprocess.TimeoutExpired(
-            ["tool"], execute.PROCESS_CLEANUP_TIMEOUT_SECONDS, output=b"child-open"
-        )
-        second_cleanup = subprocess.TimeoutExpired(
-            ["tool"], execute.PROCESS_CLEANUP_TIMEOUT_SECONDS, stderr=b"child-error"
-        )
         process = mock.Mock()
         process.pid = 2468
         process.poll.return_value = 0
-        process.communicate.side_effect = [initial, first_cleanup, second_cleanup]
-        process.wait.side_effect = subprocess.TimeoutExpired(
-            ["tool"], execute.PROCESS_CLEANUP_TIMEOUT_SECONDS
-        )
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired(
+                ["tool"], execute.PROCESS_CLEANUP_TIMEOUT_SECONDS
+            ),
+            subprocess.TimeoutExpired(
+                ["tool"], execute.PROCESS_CLEANUP_TIMEOUT_SECONDS
+            ),
+            subprocess.TimeoutExpired(
+                ["tool"], execute.PROCESS_CLEANUP_TIMEOUT_SECONDS
+            ),
+        ]
 
-        with mock.patch.object(execute.subprocess, "Popen", return_value=process):
+        def start_process(argv, **kwargs):
+            kwargs["stdout"].write(b"child-open")
+            kwargs["stderr"].write(b"child-error")
+            return process
+
+        with mock.patch.object(execute.subprocess, "Popen", side_effect=start_process):
             with mock.patch.object(execute.os, "killpg") as killpg:
-                with self.assertRaises(execute.CommandTimeout) as raised:
-                    execute.CommandRunner().run(
-                        ["tool"], cwd=Path.cwd(), timeout_seconds=3
-                    )
+                with mock.patch.object(execute.time, "monotonic", side_effect=[0, 4]):
+                    with self.assertRaises(execute.CommandTimeout) as raised:
+                        execute.CommandRunner().run(
+                            ["tool"], cwd=Path.cwd(), timeout_seconds=3
+                        )
 
         self.assertEqual(3, killpg.call_count)
         self.assertTrue(
@@ -2502,17 +2844,11 @@ class CommandRunnerTest(unittest.TestCase):
         process.kill.assert_not_called()
         self.assertEqual(
             [
-                mock.call(input=None, timeout=3),
+                mock.call(timeout=execute.PROCESS_CLEANUP_TIMEOUT_SECONDS),
                 mock.call(timeout=execute.PROCESS_CLEANUP_TIMEOUT_SECONDS),
                 mock.call(timeout=execute.PROCESS_CLEANUP_TIMEOUT_SECONDS),
             ],
-            process.communicate.call_args_list,
-        )
-        process.stdin.close.assert_called_once_with()
-        process.stdout.close.assert_called_once_with()
-        process.stderr.close.assert_called_once_with()
-        process.wait.assert_called_once_with(
-            timeout=execute.PROCESS_CLEANUP_TIMEOUT_SECONDS
+            process.wait.call_args_list,
         )
         self.assertEqual("child-open", raised.exception.stdout)
         self.assertEqual("child-error", raised.exception.stderr)

@@ -15,6 +15,8 @@ import json
 import os
 import pwd
 import re
+import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -72,8 +74,12 @@ MAX_TIMEOUT_SECONDS = 86_400
 MAX_PROMPT_EVIDENCE_CHARS = 120_000
 MAX_FAILURE_ANALYSIS_CHARS = 30_000
 PROCESS_CLEANUP_TIMEOUT_SECONDS = 2
+COMMAND_POLL_INTERVAL_SECONDS = 0.1
+MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
+PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS = 15
 EXECUTION_BUSY_EXIT_CODE = 75
 RUN_LOCK_NAME = ".execute.lock"
+SYSTEM_TEMP_ROOT = Path("/private/tmp")
 MAX_PROGRESS_INDEX_BYTES = 8 * 1024 * 1024
 PLAN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 FULL_GIT_SHA_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
@@ -82,6 +88,22 @@ GIT_PUSH_PATTERN = re.compile(r"\bgit\b[^;&|\n]*\bpush\b", re.IGNORECASE)
 ACCEPTANCE_PROFILE_NAME = "scv-acceptance"
 SANDBOX_STARTED_MARKER = "__SCV_ACCEPTANCE_SANDBOX_STARTED__"
 SANDBOX_COMMAND_WRAPPER = 'printf "%s\\n" "$1"; exec sh -lc "$2"'
+SANDBOX_PINNED_COMMAND_WRAPPER = (
+    'printf "%s\\n" "$1"; export PATH="$3"; exec sh -c "$2"'
+)
+PACKAGE_MANAGER_PIN_PATTERN = re.compile(
+    r"^(?P<name>npm|pnpm|yarn|bun)@"
+    r"(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+    r"(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?)"
+    r"(?:\+sha(?:224|256|384|512)\.[0-9A-Za-z+/=_-]+)?$"
+)
+PACKAGE_MANAGER_SAFE_ENVIRONMENT = {
+    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+    "COREPACK_ENABLE_NETWORK": "0",
+    "COREPACK_ENABLE_PROJECT_SPEC": "0",
+    "npm_config_manage_package_manager_versions": "false",
+    "npm_config_offline": "true",
+}
 EXECUTION_STATUSES = frozenset(
     {
         "pending",
@@ -221,6 +243,25 @@ class CommandCancelled(ExecutorError):
 
 class InfrastructureBlocker(ExecutorError):
     """The local execution infrastructure is unavailable or failed to start."""
+
+
+class CommandOutputLimit(InfrastructureBlocker):
+    """A subprocess exceeded the controller's bounded output capture."""
+
+    def __init__(
+        self,
+        argv: Sequence[str],
+        limit_bytes: int,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        super().__init__(
+            f"명령 출력이 controller 한도 {limit_bytes}바이트를 초과했습니다: {argv[0]}"
+        )
+        self.argv = tuple(argv)
+        self.limit_bytes = limit_bytes
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class ExecutionBusy(ExecutorError):
@@ -380,12 +421,33 @@ def _allowlisted_environment(names: Sequence[str]) -> dict[str, str]:
     return environment
 
 
+def _system_temporary_root() -> Path:
+    """Return an environment-independent macOS temporary root."""
+
+    try:
+        root = SYSTEM_TEMP_ROOT.resolve(strict=True)
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        raise InfrastructureBlocker(
+            f"macOS 시스템 임시 영역을 확인할 수 없습니다: {exc}"
+        ) from exc
+    if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
+        raise InfrastructureBlocker(
+            f"macOS 시스템 임시 영역을 사용할 수 없습니다: {root}"
+        )
+    return root
+
+
 def acceptance_config(
     scratch: Path,
     workspace: Path,
     source_home: Path,
+    *,
+    workspace_permission: str = "write",
 ) -> str:
     """Build a fail-closed acceptance profile around one worktree."""
+
+    if workspace_permission not in {"read", "write"}:
+        raise ValueError("workspace_permission은 read 또는 write여야 합니다")
 
     scratch = scratch.resolve()
     workspace = workspace.resolve()
@@ -394,7 +456,7 @@ def acceptance_config(
 
     filesystem: dict[str, str] = {
         ":root": "read",
-        str(workspace): "write",
+        str(workspace): workspace_permission,
     }
     for path in _repository_runtime_paths(workspace):
         filesystem[str(path)] = "read"
@@ -435,6 +497,13 @@ class CommandResult:
     duration_seconds: float
 
 
+@dataclass(frozen=True)
+class PinnedPackageManager:
+    name: str
+    version: str
+    executable: Path
+
+
 class CommandRunner:
     """Small subprocess seam so controller behavior is unit-testable."""
 
@@ -446,54 +515,167 @@ class CommandRunner:
         timeout_seconds: int,
         input_text: str | None = None,
         env: Mapping[str, str] | None = None,
+        output_limit_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
     ) -> CommandResult:
+        if type(output_limit_bytes) is not int or output_limit_bytes < 1:
+            raise ValueError("output_limit_bytes는 1 이상의 정수여야 합니다")
         started = time.monotonic()
+        stdin_file = None
+        capture_root = str(_system_temporary_root())
+        try:
+            stdout_file = tempfile.TemporaryFile(mode="w+b", dir=capture_root)
+            stderr_file = tempfile.TemporaryFile(mode="w+b", dir=capture_root)
+            if input_text is not None:
+                stdin_file = tempfile.TemporaryFile(mode="w+b", dir=capture_root)
+                stdin_file.write(input_text.encode("utf-8"))
+                stdin_file.seek(0)
+        except OSError as exc:
+            for stream in (
+                stdin_file,
+                locals().get("stdout_file"),
+                locals().get("stderr_file"),
+            ):
+                if stream is not None:
+                    stream.close()
+            raise InfrastructureBlocker(
+                f"명령 출력을 위한 controller 임시 파일을 준비할 수 없습니다: {exc}"
+            ) from exc
+
         try:
             popen_options: dict[str, Any] = {}
             if os.name == "posix":
                 popen_options["start_new_session"] = True
             elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
                 popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            process = subprocess.Popen(
-                list(argv),
-                cwd=str(cwd),
-                stdin=subprocess.PIPE if input_text is not None else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=dict(env) if env is not None else None,
-                **popen_options,
+            try:
+                process = subprocess.Popen(
+                    list(argv),
+                    cwd=str(cwd),
+                    stdin=stdin_file,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    text=False,
+                    env=dict(env) if env is not None else None,
+                    **popen_options,
+                )
+            except KeyboardInterrupt as exc:
+                raise CommandCancelled("명령이 취소되었습니다") from exc
+            except OSError as exc:
+                raise CommandLaunchError(
+                    f"{argv[0]} 명령을 시작할 수 없습니다: {exc}"
+                ) from exc
+
+            try:
+                self._wait_with_output_limit(
+                    process,
+                    argv,
+                    timeout_seconds,
+                    stdout_file,
+                    stderr_file,
+                    output_limit_bytes,
+                    started,
+                )
+            except CommandOutputLimit as exc:
+                stdout, stderr = self._terminate_and_collect(
+                    process,
+                    stdout_file,
+                    stderr_file,
+                    output_limit_bytes,
+                )
+                raise CommandOutputLimit(
+                    argv,
+                    output_limit_bytes,
+                    stdout,
+                    stderr,
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                stdout, stderr = self._terminate_and_collect(
+                    process,
+                    stdout_file,
+                    stderr_file,
+                    output_limit_bytes,
+                )
+                raise CommandTimeout(
+                    argv,
+                    timeout_seconds,
+                    stdout,
+                    stderr,
+                ) from exc
+            except KeyboardInterrupt as exc:
+                self._terminate_and_collect(
+                    process,
+                    stdout_file,
+                    stderr_file,
+                    output_limit_bytes,
+                )
+                raise CommandCancelled("명령이 취소되었습니다") from exc
+
+            self._terminate_remaining_process_group(process)
+            stdout, stderr = self._read_captures(
+                stdout_file,
+                stderr_file,
+                output_limit_bytes,
             )
-        except KeyboardInterrupt as exc:
-            raise CommandCancelled("명령이 취소되었습니다") from exc
-        except OSError as exc:
-            raise CommandLaunchError(f"{argv[0]} 명령을 시작할 수 없습니다: {exc}") from exc
-        try:
-            stdout, stderr = process.communicate(
-                input=input_text,
-                timeout=timeout_seconds,
+            return CommandResult(
+                argv=tuple(argv),
+                returncode=process.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                duration_seconds=time.monotonic() - started,
             )
-        except subprocess.TimeoutExpired as exc:
-            stdout, stderr = self._terminate_and_collect(process, exc)
-            raise CommandTimeout(
-                argv,
-                timeout_seconds,
-                stdout,
-                stderr,
-            ) from exc
-        except KeyboardInterrupt as exc:
-            self._terminate_and_collect(process)
-            raise CommandCancelled("명령이 취소되었습니다") from exc
-        return CommandResult(
-            argv=tuple(argv),
-            returncode=process.returncode,
-            stdout=stdout or "",
-            stderr=stderr or "",
-            duration_seconds=time.monotonic() - started,
-        )
+        finally:
+            for stream in (stdin_file, stdout_file, stderr_file):
+                if stream is not None:
+                    stream.close()
 
     @staticmethod
-    def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    def _capture_size(*streams: Any) -> int:
+        return sum(os.fstat(stream.fileno()).st_size for stream in streams)
+
+    @classmethod
+    def _wait_with_output_limit(
+        cls,
+        process: subprocess.Popen[bytes],
+        argv: Sequence[str],
+        timeout_seconds: int,
+        stdout_file: Any,
+        stderr_file: Any,
+        output_limit_bytes: int,
+        started: float,
+    ) -> None:
+        deadline = started + timeout_seconds
+        while True:
+            if cls._capture_size(stdout_file, stderr_file) > output_limit_bytes:
+                raise CommandOutputLimit(argv, output_limit_bytes)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(list(argv), timeout_seconds)
+            try:
+                process.wait(timeout=min(COMMAND_POLL_INTERVAL_SECONDS, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        if cls._capture_size(stdout_file, stderr_file) > output_limit_bytes:
+            raise CommandOutputLimit(argv, output_limit_bytes)
+
+    @staticmethod
+    def _read_captures(
+        stdout_file: Any,
+        stderr_file: Any,
+        limit_bytes: int,
+    ) -> tuple[str, str]:
+        remaining = limit_bytes
+        captured: list[str] = []
+        for stream in (stdout_file, stderr_file):
+            stream.flush()
+            stream.seek(0)
+            raw = stream.read(remaining)
+            remaining -= len(raw)
+            captured.append(raw.decode("utf-8", errors="replace"))
+        return captured[0], captured[1]
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         """Kill the whole child process group created by ``run`` and fail closed."""
 
         if os.name == "posix":
@@ -510,49 +692,53 @@ class CommandRunner:
             except ProcessLookupError:
                 pass
 
+    @staticmethod
+    def _terminate_remaining_process_group(process: subprocess.Popen[bytes]) -> None:
+        """Remove descendants left behind after the command leader has exited."""
+
+        if os.name != "posix":
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            raise InfrastructureBlocker(
+                "종료된 명령의 남은 process group을 정리할 수 없습니다: "
+                f"{exc}"
+            ) from exc
+
     @classmethod
     def _terminate_and_collect(
         cls,
-        process: subprocess.Popen[str],
-        initial_timeout: subprocess.TimeoutExpired | None = None,
+        process: subprocess.Popen[bytes],
+        stdout_file: Any,
+        stderr_file: Any,
+        output_limit_bytes: int,
     ) -> tuple[str, str]:
-        """Terminate descendants and collect output without any unbounded wait."""
+        """Terminate the process group and return only the bounded capture."""
 
-        stdout = _as_text(getattr(initial_timeout, "stdout", None))
-        stderr = _as_text(getattr(initial_timeout, "stderr", None))
         for _ in range(2):
             cls._terminate_process_group(process)
             try:
-                collected_stdout, collected_stderr = process.communicate(
-                    timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS
-                )
-                return (
-                    _as_text(collected_stdout) or stdout,
-                    _as_text(collected_stderr) or stderr,
-                )
-            except subprocess.TimeoutExpired as exc:
-                stdout = _as_text(exc.stdout) or stdout
-                stderr = _as_text(exc.stderr) or stderr
+                process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                continue
             except KeyboardInterrupt:
                 continue
-
-        cls._terminate_process_group(process)
-        if process.poll() is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-        for stream in (process.stdin, process.stdout, process.stderr):
-            if stream is not None:
+        else:
+            cls._terminate_process_group(process)
+            if process.poll() is None:
                 try:
-                    stream.close()
-                except OSError:
+                    process.kill()
+                except ProcessLookupError:
                     pass
-        try:
-            process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
-        except (subprocess.TimeoutExpired, KeyboardInterrupt):
-            pass
-        return stdout, stderr
+            try:
+                process.wait(timeout=PROCESS_CLEANUP_TIMEOUT_SECONDS)
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                pass
+        return cls._read_captures(stdout_file, stderr_file, output_limit_bytes)
 
 
 @dataclass(frozen=True)
@@ -1935,6 +2121,8 @@ class StepExecutor:
             except (LearningError, OSError, ValueError) as exc:
                 self.learning_unavailable_reason = redact_text(exc, 1_000)
         self.source_codex_home = _configured_codex_home()
+        self.package_manager: PinnedPackageManager | None = None
+        self._repository_boundaries_cache: tuple[Path, ...] | None = None
         self.index: dict[str, Any] = {}
 
     def run(self) -> RunOutcome:
@@ -2057,6 +2245,8 @@ class StepExecutor:
         except RuntimeRequirementError as exc:
             raise InfrastructureBlocker(str(exc)) from exc
 
+        self.package_manager = self._resolve_package_manager()
+
         try:
             with self._acceptance_environment() as environment:
                 sandbox = self.runner.run(
@@ -2076,19 +2266,168 @@ class StepExecutor:
                 + _sandbox_failure_detail(detail)
             )
 
+    def _repository_boundaries(self) -> tuple[Path, ...]:
+        if self._repository_boundaries_cache is not None:
+            return self._repository_boundaries_cache
+        try:
+            result = self.runner.run(
+                ["git", "worktree", "list", "--porcelain", "-z"],
+                cwd=self.root,
+                timeout_seconds=30,
+            )
+        except (CommandTimeout, CommandLaunchError) as exc:
+            raise InfrastructureBlocker(
+                f"Git worktree 경계를 확인할 수 없습니다: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            detail = result.stderr or result.stdout or f"종료 코드 {result.returncode}"
+            raise InfrastructureBlocker(
+                f"Git worktree 경계를 확인할 수 없습니다: {_clip(detail)}"
+            )
+
+        boundaries = {self.root.resolve()}
+        boundaries.update(_repository_runtime_paths(self.root))
+        for field in result.stdout.split("\0"):
+            if not field.startswith("worktree "):
+                continue
+            raw_path = field.removeprefix("worktree ")
+            if not raw_path:
+                raise InfrastructureBlocker("Git worktree 경로가 비어 있습니다")
+            try:
+                boundaries.add(Path(raw_path).resolve(strict=True))
+            except (FileNotFoundError, OSError, RuntimeError) as exc:
+                raise InfrastructureBlocker(
+                    f"Git worktree 경로를 확인할 수 없습니다: {raw_path}: {exc}"
+                ) from exc
+        self._repository_boundaries_cache = tuple(sorted(boundaries, key=str))
+        return self._repository_boundaries_cache
+
+    def _assert_external_acceptance_scratch(self, scratch: Path) -> None:
+        scratch = scratch.resolve()
+        for boundary in self._repository_boundaries():
+            if (
+                scratch == boundary
+                or boundary in scratch.parents
+                or scratch in boundary.parents
+            ):
+                raise InfrastructureBlocker(
+                    "인수 검증용 임시 디렉터리가 저장소 경계와 겹칩니다: "
+                    f"{scratch} / {boundary}"
+                )
+
+    def _read_package_manager_pin(self) -> tuple[str, str] | None:
+        manifest = self.root / "package.json"
+        if not manifest.is_file():
+            return None
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise InfrastructureBlocker(
+                f"package.json의 packageManager pin을 읽을 수 없습니다: {exc}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise InfrastructureBlocker("package.json 루트는 JSON object여야 합니다")
+        package_manager = value.get("packageManager")
+        if package_manager is None:
+            return None
+        if not isinstance(package_manager, str):
+            raise InfrastructureBlocker("packageManager pin은 문자열이어야 합니다")
+        matched = PACKAGE_MANAGER_PIN_PATTERN.fullmatch(package_manager)
+        if matched is None:
+            raise InfrastructureBlocker(
+                "packageManager는 지원되는 manager의 정확한 semantic version이어야 합니다: "
+                + package_manager
+            )
+        return matched.group("name"), matched.group("version")
+
+    def _resolve_package_manager(self) -> PinnedPackageManager | None:
+        pin = self._read_package_manager_pin()
+        if pin is None:
+            return None
+        name, version = pin
+        parent_environment = _allowlisted_environment(
+            ACCEPTANCE_PARENT_SAFE_ENVIRONMENT
+        )
+        candidate = shutil.which(name, path=parent_environment["PATH"])
+        if candidate is None:
+            raise InfrastructureBlocker(
+                f"{name}@{version} pin과 일치하는 사전 설치 바이너리가 PATH에 없습니다"
+            )
+        try:
+            executable = Path(candidate).resolve(strict=True)
+        except (FileNotFoundError, OSError, RuntimeError) as exc:
+            raise InfrastructureBlocker(
+                f"{name}@{version} 바이너리를 확인할 수 없습니다: {exc}"
+            ) from exc
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise InfrastructureBlocker(
+                f"{name}@{version} 바이너리를 실행할 수 없습니다: {executable}"
+            )
+
+        try:
+            with self._acceptance_environment(
+                include_package_manager=False,
+                workspace_permission="read",
+            ) as environment:
+                environment.update(PACKAGE_MANAGER_SAFE_ENVIRONMENT)
+                scratch = Path(environment["HOME"])
+                result = self.runner.run(
+                    self._sandbox_process_argv(
+                        [str(executable), "--version"],
+                        working_directory=scratch,
+                    ),
+                    cwd=scratch,
+                    timeout_seconds=PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS,
+                    env=environment,
+                )
+        except CommandTimeout as exc:
+            raise InfrastructureBlocker(
+                f"{name}@{version} 로컬 바이너리 확인이 "
+                f"{PACKAGE_MANAGER_PROBE_TIMEOUT_SECONDS}초 안에 끝나지 않았습니다"
+            ) from exc
+        except InfrastructureBlocker as exc:
+            raise InfrastructureBlocker(
+                f"{name}@{version} 로컬 바이너리를 안전하게 확인할 수 없습니다: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            detail = result.stderr or result.stdout or f"종료 코드 {result.returncode}"
+            raise InfrastructureBlocker(
+                f"{name}@{version} 로컬 바이너리 확인에 실패했습니다: {_clip(detail)}"
+            )
+        reported_lines = [
+            line.strip() for line in result.stdout.splitlines() if line.strip()
+        ]
+        reported = reported_lines[-1].removeprefix("v") if reported_lines else ""
+        if reported != version:
+            raise InfrastructureBlocker(
+                f"packageManager pin {name}@{version}과 PATH 바이너리 버전 "
+                f"{reported or 'unknown'}이 일치하지 않습니다"
+            )
+        return PinnedPackageManager(name, version, executable)
+
     @contextmanager
-    def _acceptance_environment(self) -> Iterator[dict[str, str]]:
-        scratch_parent = self.run_dir / "scratch"
+    def _acceptance_environment(
+        self,
+        *,
+        include_package_manager: bool = True,
+        workspace_permission: str = "write",
+    ) -> Iterator[dict[str, str]]:
         temporary: tempfile.TemporaryDirectory[str] | None = None
         try:
-            scratch_parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(scratch_parent, 0o700)
             temporary = tempfile.TemporaryDirectory(
-                prefix="command-",
-                dir=str(scratch_parent),
+                prefix="scv-acceptance-",
+                dir=str(_system_temporary_root()),
             )
-            scratch = Path(temporary.name)
+            scratch = Path(temporary.name).resolve()
             os.chmod(scratch, 0o700)
+            self._assert_external_acceptance_scratch(scratch)
+        except InfrastructureBlocker:
+            if temporary is not None:
+                try:
+                    temporary.cleanup()
+                except Exception:
+                    pass
+            raise
         except OSError as exc:
             if temporary is not None:
                 try:
@@ -2107,11 +2446,36 @@ class StepExecutor:
                     scratch,
                     self.root,
                     self.source_codex_home,
+                    workspace_permission=workspace_permission,
                 ),
             ) as (_, environment):
                 for name in ("TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME"):
                     environment[name] = str(scratch)
                 environment["HOME"] = str(scratch)
+                if include_package_manager and self.package_manager is not None:
+                    try:
+                        wrapper_root = scratch / "bin"
+                        wrapper_root.mkdir(mode=0o700)
+                        os.chmod(wrapper_root, 0o700)
+                        wrapper = wrapper_root / self.package_manager.name
+                        atomic_write_text(
+                            wrapper,
+                            "#!/bin/sh\nexec "
+                            + shlex.quote(str(self.package_manager.executable))
+                            + ' "$@"\n',
+                        )
+                        os.chmod(wrapper, 0o700)
+                    except OSError as exc:
+                        raise InfrastructureBlocker(
+                            "검증된 package-manager wrapper를 준비할 수 없습니다: "
+                            f"{exc}"
+                        ) from exc
+                    environment.update(PACKAGE_MANAGER_SAFE_ENVIRONMENT)
+                    environment["PATH"] = (
+                        str(wrapper_root)
+                        + os.pathsep
+                        + environment.get("PATH", os.defpath)
+                    )
                 yield environment
         finally:
             active_error = sys.exc_info()[0] is not None
@@ -2123,7 +2487,12 @@ class StepExecutor:
                         f"인수 검증용 임시 디렉터리를 정리할 수 없습니다: {exc}"
                     ) from exc
 
-    def _sandbox_argv(self, command: str, *arguments: str) -> list[str]:
+    def _sandbox_process_argv(
+        self,
+        command: Sequence[str],
+        *,
+        working_directory: Path | None = None,
+    ) -> list[str]:
         return [
             self.codex_binary,
             "sandbox",
@@ -2131,13 +2500,20 @@ class StepExecutor:
             ACCEPTANCE_PROFILE_NAME,
             "--sandbox-state-disable-network",
             "-C",
-            str(self.root),
+            str((working_directory or self.root).resolve()),
             "--",
-            "sh",
-            "-lc",
-            command,
-            *arguments,
+            *command,
         ]
+
+    def _sandbox_argv(self, command: str, *arguments: str) -> list[str]:
+        return self._sandbox_process_argv(
+            [
+                "sh",
+                "-lc",
+                command,
+                *arguments,
+            ]
+        )
 
     def _run_final_validation(self) -> RunOutcome:
         """Re-run every step AC and perform one whole-plan read-only review."""
@@ -2529,15 +2905,13 @@ class StepExecutor:
                         raise StateError(
                             f"{step_id} 단계의 완료된 시도에 worker 실행 증거가 없습니다"
                         )
-                if attempt.get("status") == "running":
-                    attempt["status"] = "interrupted"
-                    attempt["finished_at"] = _utc_now()
-                    attempt["failure"] = {
-                        "stage": "controller",
-                        "message": "이전 제어기 프로세스가 결과 기록 전에 종료되었습니다",
-                    }
-                    state["status"] = "pending"
-                    changed = True
+                if attempt_status == "running":
+                    if attempt.get("finished_at") is not None or attempt.get(
+                        "failure"
+                    ) is not None:
+                        raise StateError(
+                            f"{step_id} 단계의 실행 중 시도 종료 정보가 올바르지 않습니다"
+                        )
                 elif attempt_status == "passed":
                     if not isinstance(attempt.get("finished_at"), str) or attempt.get(
                         "failure"
@@ -2552,6 +2926,26 @@ class StepExecutor:
                         or not isinstance(failure.get("message"), str)
                     ):
                         raise StateError(f"{step_id} 단계의 실패 시도 기록이 올바르지 않습니다")
+            if running_positions:
+                interrupted = attempts.pop()
+                blockers.append(
+                    {
+                        "number": len(blockers) + 1,
+                        "status": "blocked",
+                        "started_at": interrupted["started_at"],
+                        "finished_at": _utc_now(),
+                        "failure": {
+                            "stage": "controller",
+                            "message": (
+                                "이전 controller가 실행 결과를 확정하기 전에 종료되어 "
+                                "구현 시도 예산에서 제외했습니다"
+                            ),
+                        },
+                        "evidence": interrupted["evidence"],
+                    }
+                )
+                state["status"] = "pending"
+                changed = True
             passed_positions = [
                 position
                 for position, attempt in enumerate(attempts)
@@ -3958,13 +4352,23 @@ this step and the acceptance evidence is credible. Return structured output only
             blocker: InfrastructureBlocker | None = None
             try:
                 with self._acceptance_environment() as environment:
-                    result = self.runner.run(
-                        self._sandbox_argv(
+                    if self.package_manager is None:
+                        sandbox_argv = self._sandbox_argv(
                             SANDBOX_COMMAND_WRAPPER,
                             "scv-acceptance",
                             SANDBOX_STARTED_MARKER,
                             command,
-                        ),
+                        )
+                    else:
+                        sandbox_argv = self._sandbox_argv(
+                            SANDBOX_PINNED_COMMAND_WRAPPER,
+                            "scv-acceptance",
+                            SANDBOX_STARTED_MARKER,
+                            command,
+                            environment["PATH"],
+                        )
+                    result = self.runner.run(
+                        sandbox_argv,
                         cwd=self.root,
                         timeout_seconds=timeout_seconds,
                         env=environment,

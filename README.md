@@ -91,6 +91,14 @@ Improve    실패 분석 → 제한된 재시도 → lesson 후보/개선 제안
 - 인수 검사는 부모 환경을 최소 allowlist로 다시 만들고, Codex·SSH·클라우드·
   패키지 관리자 자격증명 경로 읽기와 네트워크, 허용 경로 밖 쓰기를 차단한
   Codex sandbox에서 실행한다.
+- 명령별 인수 `HOME`·`TMP*`는 `/private/tmp`의 독립 `0700` 경로를 사용하며 모든
+  worktree와 Git common directory 밖인지 확인한다. 정확한 `packageManager` pin은
+  PATH에 사전 설치된 동일 버전을 offline으로 검증한 뒤에만 wrapper로 제공하고,
+  부재·불일치·자동 설치 요구는 worker 전 infrastructure blocker로 처리한다.
+- subprocess stdout/stderr는 합계 8 MiB로 제한하고 초과·timeout·취소 시 전체
+  process group을 종료한다. 명령 본체가 먼저 끝나도 같은 group에 남은 background
+  자식을 정리한다. controller 재시작으로 미완료된 attempt는 구현 예산에서
+  제외하고 blocker 감사 기록으로 보존한다.
 - 중첩 Codex는 인증만 연결한 임시 `CODEX_HOME`과 별도 모델 HOME을 사용한다.
   worker는 worktree 쓰기, verifier와 Failure Analyst는 읽기 전용 권한 프로필을
   사용하며, 이 프로필에 구형 `--sandbox` 옵션을 다시 합성하지 않는다.

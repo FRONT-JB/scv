@@ -12,6 +12,9 @@ SCV는 macOS에서 요구사항 정리부터 구현 계획 승인, 격리 워크
 - 구현은 승인된 기준 리비전을 다시 확인한 뒤 격리 워크트리에서만 실행한다.
 - 각 단계 검증을 통과한 뒤 전체 인수 조건을 다시 실행하고 읽기 전용 검증기로 최종 확인한다.
 - 인수 조건은 부모 환경을 최소 allowlist로 다시 만들고, Codex·SSH·클라우드·패키지 관리자 자격증명 경로의 읽기와 네트워크, 워크트리·전용 임시 공간 밖 쓰기를 차단한 Codex 샌드박스에서 실행한다.
+- 명령별 인수 `HOME`·`TMP*`는 호스트 `TMPDIR`과 무관한 `/private/tmp` 아래 `0700` 경로이며, 모든 worktree와 Git common directory 밖인지 확인한 뒤 사용한다.
+- 루트 `package.json`에 정확한 `packageManager` pin이 있으면 worker보다 먼저 PATH의 사전 설치 바이너리를 network-disabled 환경에서 15초 안에 한 번 검증한다. 버전이 정확히 같을 때만 절대 경로 wrapper로 제공하며, 부재·불일치·bootstrap 요구는 시도 예산을 쓰지 않는 infrastructure blocker다. 자동 다운로드는 하지 않는다.
+- 각 subprocess의 stdout/stderr는 합계 8 MiB로 제한한다. 초과, timeout, 취소 시 controller가 만든 process group 전체를 종료하고, 명령 본체가 먼저 끝나도 남은 background 자식을 정리한다.
 - 실행 완료 후 워크트리 HEAD 또는 내용이 바뀌면 인계를 차단하고 재검증을 요구한다.
 - 단계별·최종 실행 증거 묶음의 해시를 저장하고, 재개와 상태 조회 때 실제 파일을 다시 확인한다.
 - `READY`가 되어도 워크트리를 자동 삭제하거나 merge·push하지 않는다.
