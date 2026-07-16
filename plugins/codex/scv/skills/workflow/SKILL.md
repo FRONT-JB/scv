@@ -47,7 +47,7 @@ voice line.
 
 Inspect repository instructions, relevant code, tests, documentation, and recent history using read-only operations. Establish the requested outcome, current behavior, non-goals, constraints, acceptance evidence, risks, and unresolved decisions. Ask only questions whose answers materially change scope or design.
 
-Write a self-contained specification artifact outside tracked repository content, then submit it:
+Write a self-contained specification artifact outside tracked repository content, then submit it. The approved copy will later be committed on a full task, so never include credentials, tokens, raw secret values, or private source material that must not enter Git history:
 
 ```text
 python3 "<plugin-root>/scripts/scv.py" --repo "<repo>" submit-spec <task-id> --spec <file>
@@ -59,7 +59,7 @@ Present the specification and request explicit approval. Approval must be a user
 
 For `plan` and `full`, turn the approved specification into ordered, reviewable steps. Name concrete files or symbols where evidence supports them, encode dependencies by step order, include exact verification commands, and identify rollback and handoff evidence. Keep unknowns explicit instead of inventing repository facts. Use the exact plan v2 JSON shape in the workflow contract with the shallow loop policy; the executor rejects unknown fields. Legacy v1 plans remain readable only for backward compatibility.
 
-Write the plan artifact outside tracked repository content, then submit it:
+Write the plan artifact outside tracked repository content, then submit it. Keep the same Git-history sensitivity boundary as the specification:
 
 ```text
 python3 "<plugin-root>/scripts/scv.py" --repo "<repo>" submit-plan <task-id> --plan <file>
@@ -75,7 +75,9 @@ For `full`, run `status <task-id>` and confirm the approved base revision and pl
 python3 "<plugin-root>/scripts/scv.py" --repo "<repo>" materialize <task-id> [--worktree <path>] [--branch <name>] [--adopt-existing]
 ```
 
-Do not create a branch or worktree by any other route. Pass `--adopt-existing` only when the user explicitly chose an already-created worktree; the controller still requires an exact branch, approved base `HEAD`, and a clean checkout. If base revalidation blocks the task, explain the delta, return to planning with `resume`, revise and resubmit the plan, and obtain plan approval again. Never bypass the gate.
+Do not create a branch, plan commit, or worktree by any other route. Materialization leaves the invoking worktree's branch, `HEAD`, index, and files untouched: the controller builds a temporary Git index from the approved source base `A`, creates a commit `P` containing only `.scv/tasks/<task-id>/{spec.md,plan.json,manifest.json}`, atomically publishes the task branch at `P`, and creates the linked worktree from that branch. Treat `A` as the implementation-diff and plan base, and `P` as the frozen execution `HEAD`. Do not edit the tracked `.scv` snapshot during execution.
+
+Pass `--adopt-existing` only when the user explicitly chose an already-created worktree; the controller still requires the exact task branch at the sealed plan commit `P` and a clean checkout. A worktree whose branch points only at `A` is not adoptable. If base revalidation blocks the task, explain the delta, return to planning with `resume`, revise and resubmit the plan, and obtain plan approval again. Never bypass the gate.
 
 ### 4. Execute
 

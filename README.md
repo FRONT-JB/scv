@@ -14,7 +14,7 @@ SCV는 요구사항을 계획하고, 격리된 작업 공간에서 구현하고,
 ```text
 Scope      요구사항 조사 → 스펙 작성 → 스펙 승인 → 구현 계획 → 계획 승인
    ↓
-Construct  기준 리비전 재확인 → 격리 worktree 생성 → 단계별 구현과 인수 검사
+Construct  소스 기준 재확인 → 승인 문서 커밋 → 격리 worktree 생성 → 구현과 인수 검사
    ↓
 Verify     전체 인수 조건 → 읽기 전용 최종 검증 → 실행 증거 고정 → 인계
    ↺
@@ -87,7 +87,14 @@ Improve    실패 분석 → 제한된 재시도 → lesson 후보/개선 제안
 
 - 스펙과 구현 계획은 서로 다른 사용자 승인 게이트를 통과해야 한다.
 - 계획 승인 전에는 브랜치나 worktree를 만들지 않는다.
-- 구현은 승인된 기준 SHA에서 만든 격리 worktree 안에서만 수행한다.
+- materialize는 기본 worktree를 switch하지 않는다. 임시 Git index로 승인된 소스
+  기준 `A` 위에 계획 커밋 `P`를 만들고 작업 브랜치를 `P`에 원자적으로 연결한
+  다음, 그 브랜치의 linked worktree를 생성한다. 기본 worktree가 dirty여도 HEAD,
+  index, 파일 상태를 변경하지 않는다.
+- 구현 diff의 기준은 `A`, 실행 중 고정하는 worktree HEAD는 `P`다. `P`에 포함된
+  `.scv/tasks/<task-id>/` 승인 문서는 실행 중 변경할 수 없다.
+- 승인 문서는 `P`의 Git object에 남으므로 자격증명, 토큰, 비공개 원문 같은
+  민감값을 스펙이나 계획에 기록하지 않는다.
 - 인수 검사는 부모 환경을 최소 allowlist로 다시 만들고, Codex·SSH·클라우드·
   패키지 관리자 자격증명 경로 읽기와 네트워크, 허용 경로 밖 쓰기를 차단한
   Codex sandbox에서 실행한다.
@@ -116,6 +123,25 @@ Improve    실패 분석 → 제한된 재시도 → lesson 후보/개선 제안
 - 같은 태스크를 여러 세션이 다뤄도 상태·제어기·실행기 잠금으로 충돌을 방지한다.
 - `READY`는 인계 가능한 상태일 뿐이다. worktree 삭제, merge, push는 자동으로
   실행하지 않는다.
+
+## 계획 커밋과 저장 위치
+
+```text
+A  승인된 소스 기준
+└── P  .scv 승인 문서만 추가한 계획 커밋 ← 작업 브랜치와 linked worktree
+    └── 구현 변경은 P를 고정 HEAD로 둔 worktree에서 생성
+```
+
+| 데이터 | 저장 위치 | Git 추적 |
+| --- | --- | --- |
+| 상태, 승인 기록, 잠금, 실행·학습 증거 | `<git-common-dir>/scv/` | 아니요 |
+| 승인된 스펙 사본 | `.scv/tasks/<task-id>/spec.md` | 계획 커밋 `P`에서 추적 |
+| 승인된 계획 사본 | `.scv/tasks/<task-id>/plan.json` | 계획 커밋 `P`에서 추적 |
+| 소스 기준과 승인 해시 | `.scv/tasks/<task-id>/manifest.json` | 계획 커밋 `P`에서 추적 |
+
+`plan.json.expected_base_sha`와 manifest의 `source_base`는 `A`를 가리킨다. `P`는
+자기 커밋 내용 안에 자신의 SHA를 기록할 수 없으므로 Git common directory의
+`plan_anchor.commit_sha`와 실행 인덱스의 `expected_head_sha`에 기록한다.
 
 ## 실패 학습과 개선
 

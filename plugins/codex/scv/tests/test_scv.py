@@ -61,7 +61,16 @@ class SCVControlPlaneTests(unittest.TestCase):
         plan_sha256: str,
         base_sha: str,
         workspace: Path,
+        head_sha: str | None = None,
     ) -> dict:
+        if head_sha is None:
+            head_sha = subprocess.run(
+                ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
         attempt_dir = run_dir / "evidence" / "step-1" / "attempt-1"
         attempt_dir.mkdir(parents=True, exist_ok=True)
         execute.atomic_write_json(
@@ -96,6 +105,7 @@ class SCVControlPlaneTests(unittest.TestCase):
             "task_id": task_id,
             "plan_sha256": plan_sha256,
             "expected_base_sha": base_sha,
+            "expected_head_sha": head_sha,
             "workspace": str(workspace.resolve()),
             "workspace_sha256": scv.workspace_fingerprint(workspace),
             "status": "ready",
@@ -336,6 +346,148 @@ class SCVControlPlaneTests(unittest.TestCase):
 
         self.assertEqual(1, len(scv.parse_worktrees(self.repo)))
 
+    def test_materialize_seals_approved_plan_without_switching_primary_worktree(self) -> None:
+        approved = self.full_task_through_plan("sealed-plan")
+        (self.repo / "README.md").write_text("staged in primary\n", encoding="utf-8")
+        self.run_git("add", "README.md")
+        (self.repo / "README.md").write_text("unstaged in primary\n", encoding="utf-8")
+        (self.repo / "primary-untracked.txt").write_text("primary only\n", encoding="utf-8")
+        primary_branch = self.run_git("branch", "--show-current")
+        primary_head = self.run_git("rev-parse", "HEAD")
+        primary_index = self.run_git("write-tree")
+        primary_status = self.run_git("status", "--porcelain", "--untracked-files=all")
+
+        executing = scv.command_materialize(
+            self.args(task_id="sealed-plan", worktree=None, branch=None),
+            self.store,
+            self.repo,
+        )
+
+        anchor = executing["artifacts"]["plan_anchor"]
+        anchor_sha = anchor["commit_sha"]
+        self.assertEqual(primary_branch, self.run_git("branch", "--show-current"))
+        self.assertEqual(primary_head, self.run_git("rev-parse", "HEAD"))
+        self.assertEqual(primary_index, self.run_git("write-tree"))
+        self.assertEqual(
+            primary_status,
+            self.run_git("status", "--porcelain", "--untracked-files=all"),
+        )
+        self.assertEqual(approved["base"]["sha"], self.run_git("rev-parse", f"{anchor_sha}^"))
+        self.assertEqual(anchor_sha, self.run_git("rev-parse", "refs/heads/scv/sealed-plan"))
+        self.assertEqual(
+            "docs(scv): 승인된 계획 문서 기록",
+            self.run_git("show", "-s", "--format=%s", anchor_sha),
+        )
+        self.assertEqual(
+            [
+                ".scv/tasks/sealed-plan/manifest.json",
+                ".scv/tasks/sealed-plan/plan.json",
+                ".scv/tasks/sealed-plan/spec.md",
+            ],
+            sorted(
+                self.run_git(
+                    "diff-tree",
+                    "--no-commit-id",
+                    "--name-only",
+                    "-r",
+                    anchor_sha,
+                ).splitlines()
+            ),
+        )
+        tracked_plan = json.loads(
+            self.run_git("show", f"{anchor_sha}:.scv/tasks/sealed-plan/plan.json")
+        )
+        self.assertEqual(approved["base"]["sha"], tracked_plan["expected_base_sha"])
+        manifest = json.loads(
+            self.run_git("show", f"{anchor_sha}:.scv/tasks/sealed-plan/manifest.json")
+        )
+        self.assertEqual("sealed-plan", manifest["task_id"])
+        self.assertEqual(approved["base"], manifest["source_base"])
+        self.assertEqual(
+            approved["artifacts"]["plan"]["sha256"],
+            manifest["artifacts"]["plan"]["sha256"],
+        )
+        worktree = Path(executing["worktree"]["path"])
+        self.assertEqual(anchor_sha, self.run_git("-C", str(worktree), "rev-parse", "HEAD"))
+        self.assertEqual(
+            "",
+            self.run_git(
+                "-C", str(worktree), "status", "--porcelain", "--untracked-files=all"
+            ),
+        )
+        self.assertEqual(anchor_sha, scv.execution_head_sha(executing))
+
+    def test_materialize_recovers_if_interrupted_after_branch_publish(self) -> None:
+        self.full_task_through_plan("publish-recovery")
+        real_set_artifact = self.store.set_artifact
+        interrupted = False
+
+        def interrupt_anchor(task_id: str, name: str, value: object):
+            nonlocal interrupted
+            if name == "plan_anchor" and not interrupted:
+                interrupted = True
+                raise OSError("simulated controller interruption")
+            return real_set_artifact(task_id, name, value)
+
+        with mock.patch.object(
+            self.store, "set_artifact", side_effect=interrupt_anchor
+        ):
+            with self.assertRaisesRegex(OSError, "controller interruption"):
+                scv.command_materialize(
+                    self.args(
+                        task_id="publish-recovery", worktree=None, branch=None
+                    ),
+                    self.store,
+                    self.repo,
+                )
+
+        blocked = self.store.load("publish-recovery")
+        self.assertEqual(State.BLOCKED.value, blocked["state"])
+        self.assertIn("worktree_intent", blocked["artifacts"])
+        self.assertNotIn("plan_anchor", blocked["artifacts"])
+        published = self.run_git("rev-parse", "refs/heads/scv/publish-recovery")
+        self.assertFalse(Path(blocked["artifacts"]["worktree_intent"]["path"]).exists())
+
+        scv.command_resume(
+            self.args(task_id="publish-recovery"), self.store, self.repo
+        )
+        executing = scv.command_materialize(
+            self.args(task_id="publish-recovery", worktree=None, branch=None),
+            self.store,
+            self.repo,
+        )
+
+        self.assertEqual(State.EXECUTING.value, executing["state"])
+        self.assertEqual(published, executing["artifacts"]["plan_anchor"]["commit_sha"])
+        self.assertEqual(
+            published,
+            self.run_git(
+                "-C", executing["worktree"]["path"], "rev-parse", "HEAD"
+            ),
+        )
+
+    def test_execute_rejects_changes_to_sealed_plan_documents(self) -> None:
+        self.full_task_through_plan("sealed-doc-drift")
+        executing = scv.command_materialize(
+            self.args(task_id="sealed-doc-drift", worktree=None, branch=None),
+            self.store,
+            self.repo,
+        )
+        worktree = Path(executing["worktree"]["path"])
+        tracked_plan = worktree / ".scv" / "tasks" / "sealed-doc-drift" / "plan.json"
+        tracked_plan.write_text(tracked_plan.read_text() + "\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(scv.SCVError, "승인 문서가.*변경"):
+            scv.command_execute(
+                self.args(task_id="sealed-doc-drift", timeout=30),
+                self.store,
+                self.repo,
+            )
+
+        blocked = self.store.load("sealed-doc-drift")
+        self.assertEqual(State.BLOCKED.value, blocked["state"])
+        self.assertEqual(State.EXECUTING.value, blocked["resume"]["resume_from"])
+
     def test_base_drift_blocks_and_resumes_at_planning(self) -> None:
         approved = self.full_task_through_plan("drift-task")
         (self.repo / "README.md").write_text("base moved\n", encoding="utf-8")
@@ -400,28 +552,31 @@ class SCVControlPlaneTests(unittest.TestCase):
             blocked["resume"]["resume_from"],
         )
 
-    def test_explicit_clean_existing_worktree_can_be_adopted(self) -> None:
+    def test_explicit_base_only_worktree_cannot_be_adopted(self) -> None:
         task = self.full_task_through_plan("adopt-worktree")
         path = scv.default_worktree(self.repo, "adopt-worktree")
         branch = "scv/adopt-worktree"
         path.parent.mkdir(parents=True, exist_ok=True)
         self.run_git("worktree", "add", "-b", branch, str(path), task["base"]["sha"])
 
-        executing = scv.command_materialize(
-            self.args(
-                task_id="adopt-worktree",
-                worktree=str(path),
-                branch=branch,
-                adopt_existing=True,
-            ),
-            self.store,
-            self.repo,
-        )
+        with self.assertRaisesRegex(scv.SCVError, "계획 커밋의 부모"):
+            scv.command_materialize(
+                self.args(
+                    task_id="adopt-worktree",
+                    worktree=str(path),
+                    branch=branch,
+                    adopt_existing=True,
+                ),
+                self.store,
+                self.repo,
+            )
 
-        self.assertEqual(State.EXECUTING.value, executing["state"])
-        intent = executing["artifacts"]["worktree_intent"]
-        self.assertTrue(intent["adopted_existing"])
-        self.assertEqual(str(path), intent["path"])
+        blocked = self.store.load("adopt-worktree")
+        self.assertEqual(State.BLOCKED.value, blocked["state"])
+        self.assertEqual(
+            State.MATERIALIZING_WORKTREE.value,
+            blocked["resume"]["resume_from"],
+        )
 
     def test_owned_clean_worktree_can_be_adopted_after_controller_restart(self) -> None:
         task = self.full_task_through_plan("recover-worktree")
@@ -626,7 +781,14 @@ class SCVControlPlaneTests(unittest.TestCase):
         busy = subprocess.CompletedProcess(
             ["execute.py"], scv.EXECUTION_BUSY_EXIT_CODE
         )
-        with mock.patch.object(scv.subprocess, "run", return_value=busy):
+        real_run = subprocess.run
+
+        def fake_executor(command: list[str], *args: object, **kwargs: object):
+            if len(command) > 1 and Path(command[1]).name == "execute.py":
+                return busy
+            return real_run(command, *args, **kwargs)
+
+        with mock.patch.object(scv.subprocess, "run", side_effect=fake_executor):
             with self.assertRaisesRegex(scv.SCVError, "실행 증거를 사용 중"):
                 scv.command_execute(
                     self.args(task_id="busy-executor", timeout=30),
@@ -914,7 +1076,7 @@ class SCVControlPlaneTests(unittest.TestCase):
         worktree = Path(status["worktree"]["path"])
         late_change = worktree / "검증-이후.txt"
         late_change.write_text("late drift\n", encoding="utf-8")
-        with self.assertRaisesRegex(scv.SCVError, "워크트리 내용이 변경"):
+        with self.assertRaisesRegex(scv.SCVError, "워크트리가 변경"):
             scv.command_status(
                 self.args(task_id="ready-status-evidence"), self.store, self.repo
             )
@@ -957,6 +1119,7 @@ class SCVControlPlaneTests(unittest.TestCase):
                 "task_id": "active-progress",
                 "plan_sha256": plan_sha256,
                 "expected_base_sha": task["base"]["sha"],
+                "expected_head_sha": scv.execution_head_sha(task),
                 "workspace": str(Path(task["worktree"]["path"]).resolve()),
                 "status": "running",
                 "updated_at": "2026-07-13T00:00:00Z",

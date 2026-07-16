@@ -1,6 +1,6 @@
 {
   "name": "scv",
-  "version": "0.2.0+codex.20260715161231",
+  "version": "0.2.0+codex.20260716092238",
   "description": "macOS에서 요구사항 접수부터 실패 학습, 구현, 검증, 인계까지 이어지는 재개 가능한 Codex 워크플로입니다.",
   "author": {
     "name": "FRONT-JB",

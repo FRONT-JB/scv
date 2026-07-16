@@ -6,10 +6,18 @@ SCV는 macOS에서 요구사항 정리부터 구현 계획 승인, 격리 워크
 
 - 스펙 승인과 계획 승인을 서로 다른 명시적 게이트로 유지한다.
 - 계획 승인 전에는 브랜치나 워크트리를 만들지 않는다.
-- 태스크 상태는 Git common directory에 저장해 워크트리 생성 전에도 같은 ID로 재개한다.
+- 태스크의 가변 상태·승인·실행 증거는 Git common directory에 저장해 워크트리
+  생성 전에도 같은 ID로 재개한다.
+- 계획 승인 후에는 승인된 `spec.md`, `plan.json`, `manifest.json` 사본만
+  `.scv/tasks/<task-id>/`에 추가한 계획 커밋을 만든다.
+- 이 승인 사본은 Git object와 작업 브랜치 기록에 남으므로 자격증명, 토큰,
+  비공개 원문 같은 민감값을 스펙이나 계획에 넣지 않는다.
+- 계획 커밋은 임시 Git index와 plumbing 명령으로 생성하므로 기본 worktree를
+  switch하지 않으며 dirty HEAD·index·파일 상태도 그대로 보존한다.
 - 상태·잠금 디렉터리는 소유자 전용 권한으로 만들고, 심볼릭 링크·비정상 파일
   유형·과도한 크기의 상태 파일이나 실행 인덱스는 읽지 않는다.
-- 구현은 승인된 기준 리비전을 다시 확인한 뒤 격리 워크트리에서만 실행한다.
+- 구현 diff는 승인된 소스 기준 `A`에 묶고, 실행 HEAD는 계획 커밋 `P`에 고정한
+  격리 워크트리에서만 실행한다. 커밋된 `.scv` 승인 문서가 바뀌면 실행을 차단한다.
 - 각 단계 검증을 통과한 뒤 전체 인수 조건을 다시 실행하고 읽기 전용 검증기로 최종 확인한다.
 - 인수 조건은 부모 환경을 최소 allowlist로 다시 만들고, Codex·SSH·클라우드·패키지 관리자 자격증명 경로의 읽기와 네트워크, 워크트리·전용 임시 공간 밖 쓰기를 차단한 Codex 샌드박스에서 실행한다.
 - 명령별 인수 `HOME`·`TMP*`는 호스트 `TMPDIR`과 무관한 `/private/tmp` 아래 `0700` 경로이며, 모든 worktree와 Git common directory 밖인지 확인한 뒤 사용한다.
@@ -67,7 +75,7 @@ plugins/codex/scv/
     └── test_scv_state.py
 ```
 
-`scv.py`가 상태 전이와 워크트리 수명주기를 소유하고, `scv_state.py`가 Git common directory 아래의 원자적 상태 저장을 담당한다. `execute.py`는 승인된 계획을 실행하고 `runs/<plan-sha>/`에 검증 증거를 남기는 내부 실행기다. `learning.py`는 같은 Git common directory의 `scv/learning/` 아래에서 실패 관찰·lesson·개선 제안을 별도 잠금으로 관리하고, `improve.py`는 최종 증거를 재검증한 사람 승인만 반영한다. `cli_ko.py`는 명령행 도움말과 오류 접두사를 한글로 통일하고, `scv_dialogue.py`는 권위 있는 상태값을 바꾸지 않고 표시 전용 한글 라벨과 대사를 덧붙인다. 개선 제안을 수리 태스크로 넘길 때는 Git이 추적하는 `plugins/codex/scv` 소스인지 확인하고, 설치된 플러그인 영역과 원본 태스크 ID를 거부한다. `workspace.py`의 공통 지문 계산으로 실행기가 검증한 정확한 워크트리 상태를 제어기와 인계 단계까지 연결한다. 외부 워크트리 도구를 필수로 요구하지 않으며 기본 구현은 `git worktree`를 사용한다. 사용자가 이미 만든 워크트리는 `--adopt-existing`을 명시한 경우에만 기준 SHA·브랜치·청결 상태를 확인한 뒤 채택한다.
+`scv.py`가 상태 전이, headless 계획 커밋, 워크트리 수명주기를 소유하고, `scv_state.py`가 Git common directory 아래의 원자적 상태 저장을 담당한다. `execute.py`는 승인된 계획을 실행하고 `runs/<plan-sha>/`에 검증 증거를 남기는 내부 실행기다. `learning.py`는 같은 Git common directory의 `scv/learning/` 아래에서 실패 관찰·lesson·개선 제안을 별도 잠금으로 관리하고, `improve.py`는 최종 증거를 재검증한 사람 승인만 반영한다. `cli_ko.py`는 명령행 도움말과 오류 접두사를 한글로 통일하고, `scv_dialogue.py`는 권위 있는 상태값을 바꾸지 않고 표시 전용 한글 라벨과 대사를 덧붙인다. 개선 제안을 수리 태스크로 넘길 때는 Git이 추적하는 `plugins/codex/scv` 소스인지 확인하고, 설치된 플러그인 영역과 원본 태스크 ID를 거부한다. `workspace.py`의 공통 지문 계산으로 실행기가 검증한 정확한 워크트리 상태를 제어기와 인계 단계까지 연결한다. 외부 워크트리 도구를 필수로 요구하지 않으며 기본 구현은 `git worktree`를 사용한다. 사용자가 이미 만든 워크트리는 `--adopt-existing`을 명시한 경우에만 계획 커밋 SHA·브랜치·청결 상태를 확인한 뒤 채택한다.
 
 ## 설치
 

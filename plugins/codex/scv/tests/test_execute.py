@@ -366,6 +366,7 @@ class ExecutorTestCase(unittest.TestCase):
             task_id=plan.task_id,
             plan_sha256=plan.sha256,
             expected_base_sha=self.sha,
+            expected_head_sha=self.sha,
             workspace=self.root,
         )
 
@@ -422,6 +423,7 @@ class ExecutorTestCase(unittest.TestCase):
         index = self.read_index()
         self.assertEqual(index["status"], "ready")
         self.assertEqual(index["expected_base_sha"], self.sha)
+        self.assertEqual(index["expected_head_sha"], self.sha)
         self.assertEqual(index["workspace_sha256"], "f" * 64)
         self.assertEqual(index["steps"][0]["attempts"][0]["status"], "passed")
         calls = self.codex_calls(runner)
@@ -490,6 +492,22 @@ class ExecutorTestCase(unittest.TestCase):
         )
         self.assertRegex(index["final_validation"]["evidence_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual("ready", execute.read_status(self.run_dir)["status"])
+
+    def test_execution_head_can_differ_from_plan_source_base(self) -> None:
+        self.write_plan()
+        execution_head = "b" * 40
+        runner = FakeRunner(self.root, execution_head)
+
+        outcome = self.execute(
+            runner,
+            expected_base=self.sha,
+            expected_head=execution_head,
+        )
+
+        self.assertTrue(outcome.ready)
+        index = self.read_index()
+        self.assertEqual(self.sha, index["expected_base_sha"])
+        self.assertEqual(execution_head, index["expected_head_sha"])
 
     def test_progress_snapshot_is_sanitized_and_readable_while_run_is_locked(self) -> None:
         self.run_dir.mkdir(parents=True)
@@ -2956,6 +2974,8 @@ class CliStatusTest(unittest.TestCase):
                         "task/run",
                         "--expected-base",
                         "a" * 40,
+                        "--expected-head",
+                        "b" * 40,
                         "--timeout",
                         "90",
                     ]
@@ -2966,6 +2986,7 @@ class CliStatusTest(unittest.TestCase):
             root=Path("worktree"),
             run_dir=Path("task/run"),
             expected_base="a" * 40,
+            expected_head="b" * 40,
             timeout_seconds=90,
             codex_binary="codex",
             revalidate_ready=False,

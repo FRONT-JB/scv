@@ -219,7 +219,7 @@ class StateError(ExecutorError):
 
 
 class BaseMismatchError(ExecutorError):
-    """The worktree HEAD no longer matches the frozen base."""
+    """The worktree HEAD no longer matches the frozen execution head."""
 
 
 class CommandTimeout(ExecutorError):
@@ -1384,6 +1384,7 @@ def read_progress(
     task_id: str,
     plan_sha256: str,
     expected_base_sha: str,
+    expected_head_sha: str | None = None,
     workspace: Path,
 ) -> dict[str, Any]:
     """Read sanitized live progress without contending with the executor lock."""
@@ -1398,6 +1399,10 @@ def read_progress(
     }
     if any(index.get(name) != value for name, value in bindings.items()):
         raise StateError("실행 진행의 태스크·계획·기준·워크트리 연결이 일치하지 않습니다")
+    expected_head = expected_head_sha or expected_base_sha
+    stored_head = index.get("expected_head_sha", index.get("expected_base_sha"))
+    if stored_head != expected_head:
+        raise StateError("실행 진행의 고정 실행 HEAD가 현재 태스크와 일치하지 않습니다")
     return summarize_execution_progress(index)
 
 
@@ -2090,6 +2095,7 @@ class StepExecutor:
         plan: Plan,
         root: Path,
         run_dir: Path,
+        expected_head_sha: str | None = None,
         codex_binary: str = "codex",
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
         runner: CommandRunner | None = None,
@@ -2106,6 +2112,11 @@ class StepExecutor:
         self.plan = plan
         self.root = root.resolve()
         self.run_dir = _resolve_run_directory(run_dir)
+        self.expected_head_sha = (
+            _validate_sha(expected_head_sha, "--expected-head")
+            if expected_head_sha is not None
+            else None
+        )
         self.index_path = self.run_dir / "index.json"
         self.evidence_root = self.run_dir / "evidence"
         self.codex_binary = codex_binary
@@ -2518,7 +2529,7 @@ class StepExecutor:
     def _run_final_validation(self) -> RunOutcome:
         """Re-run every step AC and perform one whole-plan read-only review."""
 
-        self._assert_frozen_base()
+        self._assert_frozen_head()
         previous = self.index.get("final_validation")
         validation_number = (
             previous.get("number", 0) + 1 if isinstance(previous, dict) else 1
@@ -2596,7 +2607,7 @@ class StepExecutor:
             self._set_progress("failed")
             return self._outcome()
 
-        self._assert_frozen_base()
+        self._assert_frozen_head()
         try:
             workspace_sha256 = self.workspace_fingerprinter(self.root)
         except (OSError, ValueError) as exc:
@@ -2689,12 +2700,14 @@ class StepExecutor:
             raise StateError(f"git이 올바르지 않은 전체 HEAD SHA를 반환했습니다: {head!r}")
         return head
 
-    def _assert_frozen_base(self) -> None:
+    def _assert_frozen_head(self) -> None:
         current = self._git_head()
-        expected = self.index["expected_base_sha"]
+        expected = self.index.get(
+            "expected_head_sha", self.index["expected_base_sha"]
+        )
         if current != expected:
             raise BaseMismatchError(
-                f"워크트리 HEAD가 고정 기준 {expected}에서 {current}(으)로 변경되었습니다. "
+                f"워크트리 HEAD가 고정 실행 HEAD {expected}에서 {current}(으)로 변경되었습니다. "
                 "실행기는 reset하거나 계속 진행하지 않습니다"
             )
 
@@ -2703,10 +2716,11 @@ class StepExecutor:
             raise StateError("실행 인덱스에는 심볼릭 링크를 사용할 수 없습니다")
         if not self.index_path.exists():
             current_head = self._git_head()
-            expected = self.plan.expected_base_sha or current_head
-            if current_head != expected:
+            expected_base = self.plan.expected_base_sha or current_head
+            expected_head = self.expected_head_sha or expected_base
+            if current_head != expected_head:
                 raise BaseMismatchError(
-                    f"워크트리 HEAD {current_head}가 예상 기준 {expected}와 일치하지 않습니다"
+                    f"워크트리 HEAD {current_head}가 예상 실행 HEAD {expected_head}와 일치하지 않습니다"
                 )
             now = _utc_now()
             index = {
@@ -2718,7 +2732,8 @@ class StepExecutor:
                     "max_attempts": self.plan.loop_policy.max_attempts,
                     "detect_stagnation": self.plan.loop_policy.detect_stagnation,
                 },
-                "expected_base_sha": expected,
+                "expected_base_sha": expected_base,
+                "expected_head_sha": expected_head,
                 "workspace": str(self.root),
                 "status": "pending",
                 "created_at": now,
@@ -2792,9 +2807,19 @@ class StepExecutor:
         frozen_base = index.get("expected_base_sha")
         if not isinstance(frozen_base, str) or not FULL_GIT_SHA_PATTERN.fullmatch(frozen_base):
             raise StateError("실행 인덱스의 expected_base_sha가 올바르지 않습니다")
+        frozen_head = index.get("expected_head_sha", frozen_base)
+        if not isinstance(frozen_head, str) or not FULL_GIT_SHA_PATTERN.fullmatch(
+            frozen_head
+        ):
+            raise StateError("실행 인덱스의 expected_head_sha가 올바르지 않습니다")
+        if self.expected_head_sha is not None and frozen_head != self.expected_head_sha:
+            raise StateError("실행 인덱스의 expected_head_sha가 현재 호출과 일치하지 않습니다")
         if index.get("status") not in EXECUTION_STATUSES:
             raise StateError("실행 인덱스의 status가 올바르지 않습니다")
         changed = False
+        if "expected_head_sha" not in index:
+            index["expected_head_sha"] = frozen_head
+            changed = True
         _validated_progress(index)
         _validated_termination(index)
         for state in states:
@@ -3054,7 +3079,7 @@ class StepExecutor:
                 self._set_progress(
                     "retry", step=step, attempt_number=attempt_number
                 )
-            self._assert_frozen_base()
+            self._assert_frozen_head()
             blocker_count = len(step_state.get("blockers", []))
             evidence_name = f"attempt-{attempt_number}"
             if blocker_count:
@@ -3087,7 +3112,7 @@ class StepExecutor:
                 worker_output = self._run_worker(
                     step, attempt_number, attempt_dir, previous_failure
                 )
-                self._assert_frozen_base()
+                self._assert_frozen_head()
                 timeout = step.timeout_seconds or self.timeout_seconds
                 self._set_progress(
                     "acceptance", step=step, attempt_number=attempt_number
@@ -3118,7 +3143,7 @@ class StepExecutor:
                     findings = "; ".join(verifier_output["findings"])
                     detail = findings or verifier_output["summary"]
                     raise AttemptFailure("verifier", detail)
-                self._assert_frozen_base()
+                self._assert_frozen_head()
             except CommandCancelled:
                 attempt["status"] = "cancelled"
                 attempt["finished_at"] = _utc_now()
@@ -4533,6 +4558,7 @@ def execute_plan(
     root: Path,
     run_dir: Path,
     expected_base: str | None = None,
+    expected_head: str | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     codex_binary: str = "codex",
     runner: CommandRunner | None = None,
@@ -4549,6 +4575,7 @@ def execute_plan(
         plan=plan,
         root=root,
         run_dir=run_dir,
+        expected_head_sha=expected_head,
         codex_binary=codex_binary,
         timeout_seconds=timeout_seconds,
         runner=runner,
@@ -4617,6 +4644,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="전체 SHA. 계획에도 있으면 서로 일치해야 합니다",
     )
     parser.add_argument(
+        "--expected-head",
+        metavar="실행-HEAD-SHA",
+        help="계획 산출물 커밋을 포함해 실행 중 고정할 전체 HEAD SHA",
+    )
+    parser.add_argument(
         "--timeout",
         type=int,
         default=DEFAULT_TIMEOUT_SECONDS,
@@ -4664,6 +4696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             root=arguments.root,
             run_dir=arguments.run_dir,
             expected_base=arguments.expected_base,
+            expected_head=arguments.expected_head,
             timeout_seconds=arguments.timeout,
             codex_binary=arguments.codex_binary,
             revalidate_ready=arguments.revalidate_ready,

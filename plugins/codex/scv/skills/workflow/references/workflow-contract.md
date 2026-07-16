@@ -4,13 +4,13 @@ Use this contract as the authoritative model for task state, gates, and artifact
 
 ## Invariants
 
-1. Persist task control data under the repository's Git common directory, not in tracked source content.
+1. Persist mutable task control data, approvals, locks, and execution evidence under the repository's Git common directory. Track only the immutable approved specification, plan, and manifest copies under `.scv/tasks/<task-id>/` in the sealed plan commit.
 2. Create no branch or worktree before both the specification and plan are explicitly approved.
-3. Bind execution to the approved base revision and plan. Revalidate both immediately before materialization.
+3. Bind each task to two distinct revisions: the approved source base `A` used by the plan and implementation diff, and the sealed plan commit `P` used as the frozen execution `HEAD`. Revalidate the base and approved artifacts immediately before materialization.
 4. Run implementation only in the recorded worktree.
 5. Advance from worker completion only after acceptance commands are independently recorded as passing.
 6. Re-run every step acceptance command and a whole-plan read-only verifier before execution becomes ready.
-7. Fingerprint approved artifacts plus the verified worktree HEAD and content; require the approved base at HEAD and block if either identity changes before its next gate.
+7. Fingerprint approved artifacts plus the verified worktree HEAD and content; require `P` at `HEAD`, keep the tracked `.scv` snapshot unchanged, and block if any identity changes before its next gate.
 8. Preserve task identity across stops, blocks, and target promotion.
 9. Treat `READY` as logical completion. Never infer worktree removal, merge, push, or publication from it.
 10. Keep control-plane transitions deterministic and conversational design decisions visible to the user.
@@ -26,6 +26,9 @@ Use this contract as the authoritative model for task state, gates, and artifact
 20. Keep plan v2 retries shallow: use an approved attempt budget, compare only controller-owned failure and workspace fingerprints, and stop repeated or oscillating failures without another model call or acceptance run.
 21. When the repository root declares an exact `packageManager` pin, resolve an already-installed same-name binary from the controller PATH, verify its exact version once in the network-disabled external scratch before any worker runs, and expose only that verified binary through a per-command wrapper. Never auto-download or bootstrap a package manager during acceptance.
 22. Bound each subprocess's combined stdout/stderr capture to 8 MiB. Treat overflow as an infrastructure blocker and terminate the controller-owned process group, just as for timeout or cancellation. After the command leader exits, terminate any background descendants still in that group before returning.
+23. Create `P` with a temporary Git index and Git plumbing, then atomically publish the task branch before adding its linked worktree. Never switch or modify the invoking worktree to create the plan commit.
+24. Persist the complete materialization intent before publishing the branch, and recover an interruption only after the branch parent, tree, approved hashes, worktree identity, and cleanliness match that intent.
+25. Treat approved specification and plan contents as Git-publishable data before materialization. Never place credentials, tokens, raw secrets, or private source material that must not persist in Git objects into either artifact.
 
 ## Targets
 
@@ -74,7 +77,7 @@ controller-authored message, `updated_at`, and the computed stage `scv_line`. A 
 `termination` object with its code, next action, step ID, and attempt. It never returns plan instructions, prompts, raw
 stdout/stderr, acceptance output, findings, evidence bodies, or environment
 values. The snapshot is read from an atomically replaced v1 index without taking
-the executor's exclusive run lock, and its task, plan, base, and workspace
+the executor's exclusive run lock, and its task, plan, source base, execution head, and workspace
 bindings must match the durable task before it is returned.
 
 Public execution stages are `starting`, `worker`, `acceptance`, `verifier`,
@@ -99,7 +102,7 @@ python3 "<plugin-root>/scripts/scv.py" --repo "<repo>"
 | `approve-spec TASK_ID` | Record explicit approval of the current specification |
 | `submit-plan TASK_ID --plan FILE` | Copy and fingerprint the proposed implementation plan |
 | `approve-plan TASK_ID` | Record explicit approval of the current plan |
-| `materialize TASK_ID [--worktree PATH] [--branch NAME] [--adopt-existing]` | Revalidate the base and create, recover, or explicitly adopt the isolated worktree |
+| `materialize TASK_ID [--worktree PATH] [--branch NAME] [--adopt-existing]` | Revalidate `A`, seal approved documents in `P`, and create, recover, or explicitly adopt the isolated worktree |
 | `execute TASK_ID [--timeout SECONDS]` | Invoke the executor against the approved plan |
 | `handoff TASK_ID` | Collect final diff and verification evidence and mark ready |
 | `resume TASK_ID` | Recover a block or promote the same task to its next target |
@@ -135,7 +138,7 @@ The plan must trace back to the approved specification and include:
 
 Each step must be independently understandable by an execution worker. Avoid vague steps such as "update tests" or "fix related code".
 
-New plans must use this exact JSON v2 shape. The control plane injects and fingerprints `expected_base_sha` when it stores the approved candidate, so omit that field from the draft. The executor continues to read v1 plans with their legacy three-attempt behavior, but the skill must not create new v1 plans.
+New plans must use this exact JSON v2 shape. The control plane injects and fingerprints `expected_base_sha` (`A`) when it stores the approved candidate, so omit that field from the draft. The later plan commit SHA (`P`) cannot self-reference from inside `plan.json`; the control plane records it as `plan_anchor.commit_sha` and the executor records it as `expected_head_sha`. The executor continues to read v1 plans with their legacy three-attempt behavior, but the skill must not create new v1 plans.
 
 ```json
 {
@@ -192,7 +195,9 @@ If the root `package.json` has an exact `npm`, `pnpm`, `yarn`, or `bun` `package
 
 ## Worktree ownership and recovery
 
-Before creating a worktree, persist its intended absolute path, branch, and approved base SHA. An existing worktree may be adopted only when either a previous SCV creation intent proves crash recovery or the user explicitly selected `--adopt-existing`. In both cases, require the exact branch identity, the approved base at `HEAD`, and a clean worktree. Reject unrelated, dirty, or merely name-matching worktrees.
+Before creating a worktree, persist its intended absolute path, branch, source base `A`, plan tree, approved artifact hashes, and tracked `.scv` root. Build the plan tree from `A` with a temporary index, create a single-parent conventional `docs(scv)` commit `P`, and publish the new task ref with an atomic create-only update. Only then create the linked worktree with its branch at `P`; do not check that branch out in the invoking worktree.
+
+An existing worktree may be adopted only when either a previous SCV creation intent proves crash recovery or the user explicitly selected `--adopt-existing`. In both cases, require the exact task branch at `P`, the expected plan tree and parent `A`, byte-identical approved documents, and a clean worktree. Reject a branch still at `A`, unrelated, dirty, or merely name-matching worktrees. If interruption occurs after intent or ref publication, validate and reuse the recorded objects rather than creating a competing history.
 
 ## Runtime boundary
 

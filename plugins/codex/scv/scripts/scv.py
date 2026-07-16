@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,9 @@ except ImportError:  # pragma: no cover - exercised by direct script invocation.
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+FULL_GIT_SHA_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+TRACKED_TASK_ROOT = Path(".scv") / "tasks"
+PLAN_COMMIT_MESSAGE = "docs(scv): 승인된 계획 문서 기록"
 
 
 class SCVError(RuntimeError):
@@ -276,6 +280,273 @@ def artifact_path(store: TaskStateStore, task_id: str, name: str) -> Path:
     return store.task_dir(task_id) / name
 
 
+def tracked_task_root(task_id: str) -> Path:
+    return TRACKED_TASK_ROOT / task_id
+
+
+def _git_bytes(
+    repo: Path,
+    *args: str,
+    input_bytes: bytes | None = None,
+    environment: dict[str, str] | None = None,
+) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        input=input_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode(errors="replace").strip()
+        if not detail:
+            detail = result.stdout.decode(errors="replace").strip()
+        raise SCVError(f"git {' '.join(args)} 실행 실패: {detail}")
+    return result.stdout
+
+
+def _full_git_sha(raw: bytes | str, label: str) -> str:
+    value = raw.decode(errors="replace").strip() if isinstance(raw, bytes) else raw.strip()
+    value = value.lower()
+    if not FULL_GIT_SHA_PATTERN.fullmatch(value):
+        raise SCVError(f"{label}이(가) 올바른 전체 Git SHA가 아닙니다: {value!r}")
+    return value
+
+
+def _approved_manifest_entry(task: dict[str, Any], name: str) -> dict[str, str]:
+    artifact = task.get("artifacts", {}).get(name)
+    approval = task.get("artifacts", {}).get(f"{name}_approval")
+    if not isinstance(artifact, dict) or not isinstance(artifact.get("sha256"), str):
+        raise SCVError(f"{name} 산출물 메타데이터가 올바르지 않습니다")
+    if (
+        not isinstance(approval, dict)
+        or approval.get("approved") is not True
+        or approval.get("sha256") != artifact["sha256"]
+        or not isinstance(approval.get("approved_at"), str)
+    ):
+        raise SCVError(f"{name} 승인 메타데이터가 올바르지 않습니다")
+    return {
+        "sha256": artifact["sha256"],
+        "approved_at": approval["approved_at"],
+    }
+
+
+def build_tracked_plan_artifacts(
+    store: TaskStateStore,
+    task: dict[str, Any],
+) -> tuple[Path, dict[str, bytes]]:
+    task_id = task["task_id"]
+    root = tracked_task_root(task_id)
+    spec_path = artifact_path(store, task_id, "spec.md")
+    plan_path = artifact_path(store, task_id, "plan.json")
+    spec = spec_path.read_bytes()
+    plan = plan_path.read_bytes()
+    spec_approval = _approved_manifest_entry(task, "spec")
+    plan_approval = _approved_manifest_entry(task, "plan")
+    manifest = {
+        "schema_version": 1,
+        "task_id": task_id,
+        "source_base": dict(task["base"]),
+        "artifacts": {
+            "spec": {
+                "path": (root / "spec.md").as_posix(),
+                "sha256": spec_approval["sha256"],
+            },
+            "plan": {
+                "path": (root / "plan.json").as_posix(),
+                "sha256": plan_approval["sha256"],
+            },
+        },
+        "approvals": {
+            "spec": spec_approval,
+            "plan": plan_approval,
+        },
+    }
+    manifest_bytes = (
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    entries = {
+        (root / "spec.md").as_posix(): spec,
+        (root / "plan.json").as_posix(): plan,
+        (root / "manifest.json").as_posix(): manifest_bytes,
+    }
+    return root, entries
+
+
+def build_plan_tree(
+    repo: Path,
+    *,
+    source_base_sha: str,
+    entries: dict[str, bytes],
+) -> tuple[str, dict[str, str]]:
+    with tempfile.TemporaryDirectory(prefix="scv-plan-index-") as temporary:
+        index_path = Path(temporary) / "index"
+        environment = dict(os.environ)
+        environment["GIT_INDEX_FILE"] = str(index_path)
+        _git_bytes(repo, "read-tree", source_base_sha, environment=environment)
+        blobs: dict[str, str] = {}
+        for path, data in sorted(entries.items()):
+            blob = _full_git_sha(
+                _git_bytes(repo, "hash-object", "-w", "--stdin", input_bytes=data),
+                f"{path} blob SHA",
+            )
+            _git_bytes(
+                repo,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"100644,{blob},{path}",
+                environment=environment,
+            )
+            blobs[path] = blob
+        tree = _full_git_sha(
+            _git_bytes(repo, "write-tree", environment=environment),
+            "계획 tree SHA",
+        )
+    return tree, blobs
+
+
+def create_plan_commit(
+    repo: Path,
+    *,
+    tree_sha: str,
+    source_base_sha: str,
+    approved_at: str,
+) -> str:
+    environment = dict(os.environ)
+    environment["GIT_AUTHOR_DATE"] = approved_at
+    environment["GIT_COMMITTER_DATE"] = approved_at
+    arguments = ["commit-tree", tree_sha, "-p", source_base_sha]
+    if git(repo, "config", "--bool", "--get", "commit.gpgsign", check=False) == "true":
+        arguments.append("-S")
+    return _full_git_sha(
+        _git_bytes(
+            repo,
+            *arguments,
+            input_bytes=(PLAN_COMMIT_MESSAGE + "\n").encode("utf-8"),
+            environment=environment,
+        ),
+        "계획 커밋 SHA",
+    )
+
+
+def validate_plan_commit(
+    repo: Path,
+    *,
+    ref: str,
+    source_base_sha: str,
+    expected_tree_sha: str,
+) -> str:
+    commit_sha = _full_git_sha(
+        git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}"),
+        "계획 커밋 SHA",
+    )
+    parents = git(repo, "show", "-s", "--format=%P", commit_sha).split()
+    if parents != [source_base_sha]:
+        raise SCVError("계획 커밋의 부모가 승인된 소스 기준 SHA와 일치하지 않습니다")
+    tree_sha = _full_git_sha(
+        git(repo, "rev-parse", f"{commit_sha}^{{tree}}"),
+        "계획 tree SHA",
+    )
+    if tree_sha != expected_tree_sha:
+        raise SCVError("계획 커밋 tree가 승인된 산출물 tree와 일치하지 않습니다")
+    subject = git(repo, "show", "-s", "--format=%s", commit_sha)
+    if subject != PLAN_COMMIT_MESSAGE:
+        raise SCVError("계획 커밋 메시지가 SCV 계획 고정 계약과 일치하지 않습니다")
+    return commit_sha
+
+
+def execution_head_sha(task: dict[str, Any]) -> str:
+    anchor = task.get("artifacts", {}).get("plan_anchor")
+    if anchor is None:
+        return str(task["base"]["sha"])
+    if not isinstance(anchor, dict):
+        raise SCVError("계획 앵커 메타데이터가 올바르지 않습니다")
+    commit_sha = anchor.get("commit_sha")
+    source_base_sha = anchor.get("source_base_sha")
+    if (
+        not isinstance(commit_sha, str)
+        or not FULL_GIT_SHA_PATTERN.fullmatch(commit_sha)
+        or source_base_sha != task["base"]["sha"]
+    ):
+        raise SCVError("계획 앵커의 실행 HEAD 또는 소스 기준 연결이 올바르지 않습니다")
+    return commit_sha
+
+
+def require_execution_workspace(task: dict[str, Any], root: Path) -> str:
+    """Require the worktree to remain on the sealed plan commit.
+
+    Legacy tasks created before plan commits use their source base as the
+    execution head and have no tracked plan-document root to protect.
+    """
+
+    expected_head = execution_head_sha(task)
+    current_head = _full_git_sha(git(root, "rev-parse", "HEAD"), "워크트리 HEAD")
+    if current_head != expected_head:
+        raise SCVError(
+            f"워크트리 HEAD가 변경되었습니다: 고정 실행 HEAD {expected_head}, "
+            f"현재 HEAD {current_head}"
+        )
+    anchor = task.get("artifacts", {}).get("plan_anchor")
+    if anchor is None:
+        return expected_head
+    expected_root = tracked_task_root(task["task_id"]).as_posix()
+    if not isinstance(anchor, dict) or anchor.get("tracked_root") != expected_root:
+        raise SCVError("계획 앵커의 추적 문서 경로가 현재 태스크와 일치하지 않습니다")
+    expected_hashes = {
+        f"{expected_root}/spec.md": anchor.get("spec_sha256"),
+        f"{expected_root}/plan.json": anchor.get("plan_sha256"),
+        f"{expected_root}/manifest.json": anchor.get("manifest_sha256"),
+    }
+    expected_blobs = anchor.get("blob_shas")
+    if (
+        any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in expected_hashes.values()
+        )
+        or not isinstance(expected_blobs, dict)
+        or set(expected_blobs) != set(expected_hashes)
+        or any(
+            not isinstance(value, str)
+            or not FULL_GIT_SHA_PATTERN.fullmatch(value)
+            for value in expected_blobs.values()
+        )
+    ):
+        raise SCVError("계획 앵커의 승인 문서 해시가 올바르지 않습니다")
+
+    tracked_directory = root / expected_root
+    if tracked_directory.is_symlink() or not tracked_directory.is_dir():
+        raise SCVError("고정된 .scv 승인 문서 디렉터리가 올바르지 않습니다")
+    actual_entries: set[str] = set()
+    for entry in tracked_directory.rglob("*"):
+        relative = entry.relative_to(root).as_posix()
+        actual_entries.add(relative)
+        if entry.is_symlink() or not entry.is_file():
+            raise SCVError("고정된 .scv 승인 문서 경로에 예상하지 않은 항목이 있습니다")
+    if actual_entries != set(expected_hashes):
+        raise SCVError("고정된 .scv 승인 문서 구성이 계획 커밋과 일치하지 않습니다")
+    for path, expected_sha256 in expected_hashes.items():
+        if hashlib.sha256((root / path).read_bytes()).hexdigest() != expected_sha256:
+            raise SCVError("고정된 .scv 승인 문서가 실행 워크트리에서 변경되었습니다")
+
+    staged_entries: dict[str, tuple[str, str]] = {}
+    for line in git(root, "ls-files", "--stage", "--", expected_root).splitlines():
+        metadata, separator, path = line.partition("\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3 or fields[2] != "0":
+            raise SCVError("고정된 .scv 승인 문서의 Git index 항목이 올바르지 않습니다")
+        staged_entries[path] = (fields[0], fields[1])
+    expected_staged = {
+        path: ("100644", expected_blobs[path]) for path in expected_hashes
+    }
+    if staged_entries != expected_staged:
+        raise SCVError("고정된 .scv 승인 문서가 실행 워크트리에서 변경되었습니다")
+    return expected_head
+
+
 def execution_evidence_context(
     store: TaskStateStore,
     task_id: str,
@@ -296,6 +567,11 @@ def execution_evidence_context(
         or execution.get("plan_sha256") != plan_metadata["sha256"]
     ):
         raise SCVError("실행 증거가 승인된 계획과 연결되지 않습니다")
+    expected_head = execution_head_sha(task)
+    recorded_base = execution.get("expected_base_sha", task["base"]["sha"])
+    recorded_head = execution.get("expected_head_sha", expected_head)
+    if recorded_base != task["base"]["sha"] or recorded_head != expected_head:
+        raise SCVError("실행 증거의 소스 기준 또는 고정 실행 HEAD가 현재 태스크와 다릅니다")
     index_sha256 = execution.get("index_sha256")
     if (
         not isinstance(index_sha256, str)
@@ -323,6 +599,7 @@ def require_ready_execution_bindings(
     root: Path,
     execution: dict[str, Any],
 ) -> None:
+    expected_head = execution_head_sha(task)
     bindings = {
         "task_id": task_id,
         "plan_sha256": plan_metadata["sha256"],
@@ -332,10 +609,20 @@ def require_ready_execution_bindings(
     }
     if any(evidence.get(name) != value for name, value in bindings.items()):
         raise SCVError("실행 증거의 태스크·계획·기준·워크트리 연결이 일치하지 않습니다")
+    recorded_head = evidence.get(
+        "expected_head_sha", evidence.get("expected_base_sha")
+    )
+    if recorded_head != expected_head:
+        raise SCVError("실행 증거의 고정 실행 HEAD가 현재 태스크와 일치하지 않습니다")
+    execution_base = execution.get("expected_base_sha", task["base"]["sha"])
+    execution_head = execution.get("expected_head_sha", expected_head)
+    if execution_base != task["base"]["sha"] or execution_head != expected_head:
+        raise SCVError("기록된 실행 산출물의 소스 기준 또는 실행 HEAD가 일치하지 않습니다")
     if evidence.get("status") != "ready":
         raise SCVError("실행 증거 상태가 ready가 아닙니다")
+    require_execution_workspace(task, root)
     if workspace_fingerprint(root) != execution["workspace_sha256"]:
-        raise SCVError("실행 검증 이후 워크트리 내용이 변경되었습니다")
+        raise SCVError("실행 검증 이후 워크트리가 변경되었습니다")
 
 
 def require_execution_index_fingerprint(
@@ -387,6 +674,7 @@ def command_status(args: argparse.Namespace, store: TaskStateStore, repo: Path) 
                     task_id=args.task_id,
                     plan_sha256=plan_metadata["sha256"],
                     expected_base_sha=task["base"]["sha"],
+                    expected_head_sha=execution_head_sha(task),
                     workspace=root,
                 )
             else:
@@ -578,7 +866,8 @@ def command_materialize(args: argparse.Namespace, store: TaskStateStore, repo: P
         return task
 
     try:
-        approved_artifact(store, task, "plan", "plan.json")
+        spec_metadata = approved_artifact(store, task, "spec", "spec.md")
+        plan_metadata = approved_artifact(store, task, "plan", "plan.json")
     except SCVError as exc:
         store.block(args.task_id, reason=safe_reason(exc), resume_from=State.PLANNING)
         raise SCVError(f"{exc}. 태스크를 BLOCKED로 전환했습니다") from exc
@@ -608,107 +897,240 @@ def command_materialize(args: argparse.Namespace, store: TaskStateStore, repo: P
     path = Path(args.worktree).expanduser().resolve() if args.worktree else default_worktree(repo, args.task_id)
     branch = args.branch or f"scv/{args.task_id}"
     validate_branch(repo, branch)
-    records = parse_worktrees(repo)
-    existing = next((item for item in records if Path(item["worktree"]).resolve() == path), None)
     expected_ref = f"refs/heads/{branch}"
     explicit_adoption = bool(getattr(args, "adopt_existing", False))
-    desired_intent = {
-        "path": str(path),
-        "branch": branch,
-        "base_sha": task["base"]["sha"],
-    }
-    recorded_intent = task.get("artifacts", {}).get("worktree_intent")
-    recovering = isinstance(recorded_intent, dict) and all(
-        recorded_intent.get(key) == value for key, value in desired_intent.items()
-    )
     try:
-        if recorded_intent is not None and not recovering:
-            raise SCVError("기록된 워크트리 생성 의도가 현재 경로·브랜치·기준과 일치하지 않습니다")
-        if existing:
-            if not recovering and not explicit_adoption:
-                raise SCVError(
-                    f"기존 워크트리 {path}에는 이 태스크가 기록한 생성 의도가 없어 채택할 수 없습니다"
+        tracked_root, tracked_entries = build_tracked_plan_artifacts(store, task)
+        existing_tracked = git(
+            repo,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            task["base"]["sha"],
+            "--",
+            tracked_root.as_posix(),
+        )
+        if existing_tracked:
+            raise SCVError(
+                f"승인된 소스 기준에 이미 {tracked_root.as_posix()} 경로가 있어 덮어쓸 수 없습니다"
+            )
+        tree_sha, blob_shas = build_plan_tree(
+            repo,
+            source_base_sha=task["base"]["sha"],
+            entries=tracked_entries,
+        )
+        records = parse_worktrees(repo)
+        existing = next(
+            (item for item in records if Path(item["worktree"]).resolve() == path),
+            None,
+        )
+        branch_owner = next(
+            (item for item in records if item.get("branch") == expected_ref),
+            None,
+        )
+        branch_exists_initially = bool(
+            git(repo, "show-ref", "--verify", expected_ref, check=False)
+        )
+        desired_intent = {
+            "path": str(path),
+            "branch": branch,
+            "base_sha": task["base"]["sha"],
+            "tree_sha": tree_sha,
+            "spec_sha256": spec_metadata["sha256"],
+            "plan_sha256": plan_metadata["sha256"],
+            "tracked_root": tracked_root.as_posix(),
+        }
+        recorded_intent = task.get("artifacts", {}).get("worktree_intent")
+        recovering = isinstance(recorded_intent, dict) and all(
+            recorded_intent.get(key) == value for key, value in desired_intent.items()
+        )
+        legacy_intent = (
+            isinstance(recorded_intent, dict)
+            and "tree_sha" not in recorded_intent
+            and all(
+                recorded_intent.get(key) == desired_intent[key]
+                for key in ("path", "branch", "base_sha")
+            )
+        )
+        legacy_recovery = legacy_intent and (
+            existing is not None or branch_exists_initially
+        )
+        upgrade_legacy_intent = legacy_intent and not legacy_recovery
+        if (
+            recorded_intent is not None
+            and not recovering
+            and not legacy_recovery
+            and not upgrade_legacy_intent
+        ):
+            raise SCVError("기록된 워크트리 생성 의도가 현재 경로·브랜치·계획과 일치하지 않습니다")
+
+        if legacy_recovery:
+            if existing is None:
+                if not git(repo, "show-ref", "--verify", expected_ref, check=False):
+                    raise SCVError("복구할 기존 SCV 브랜치가 없습니다")
+                if git(repo, "rev-parse", expected_ref) != task["base"]["sha"]:
+                    raise SCVError("복구할 기존 SCV 브랜치가 승인된 기준을 가리키지 않습니다")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                git(repo, "worktree", "add", str(path), branch)
+                records = parse_worktrees(repo)
+                existing = next(
+                    (
+                        item
+                        for item in records
+                        if Path(item["worktree"]).resolve() == path
+                    ),
+                    None,
                 )
-            if existing.get("branch") != expected_ref:
+            if existing is None or existing.get("branch") != expected_ref:
+                raise SCVError("기존 SCV 워크트리의 브랜치 연결이 올바르지 않습니다")
+            materialized_head = git(path, "rev-parse", "HEAD")
+            if materialized_head != task["base"]["sha"]:
+                raise SCVError("기존 SCV 워크트리 HEAD가 승인된 기준과 일치하지 않습니다")
+        else:
+            if not recovering:
+                if existing is not None and not explicit_adoption:
+                    raise SCVError(
+                        f"기존 워크트리 {path}에는 이 태스크가 기록한 생성 의도가 없어 채택할 수 없습니다"
+                    )
+                if existing is None and explicit_adoption:
+                    raise SCVError(f"명시적으로 채택할 기존 워크트리가 없습니다: {path}")
+                if branch_owner is not None and existing is None:
+                    raise SCVError(
+                        f"브랜치 {branch}가 다른 워크트리 {branch_owner['worktree']}에서 사용 중입니다"
+                    )
+                if branch_exists_initially and not explicit_adoption:
+                    raise SCVError(f"SCV 생성 의도 없이 브랜치가 이미 존재합니다: {branch}")
+                if existing is None:
+                    containing = next(
+                        (
+                            Path(item["worktree"]).resolve()
+                            for item in records
+                            if path.is_relative_to(Path(item["worktree"]).resolve())
+                        ),
+                        None,
+                    )
+                    if containing is not None:
+                        raise SCVError(
+                            f"새 워크트리 경로는 기존 워크트리 {containing} 밖에 있어야 합니다"
+                        )
+                    if path.exists() and any(path.iterdir()):
+                        raise SCVError(
+                            f"워크트리 경로가 비어 있지 않으며 SCV 관리 대상도 아닙니다: {path}"
+                        )
+                task = store.set_artifact(
+                    args.task_id,
+                    "worktree_intent",
+                    {
+                        **desired_intent,
+                        "recorded_at": utc_now(),
+                        **({"adopted_existing": True} if explicit_adoption else {}),
+                        **({"upgraded_legacy_intent": True} if upgrade_legacy_intent else {}),
+                    },
+                )
+                recovering = True
+
+            recorded_anchor = task.get("artifacts", {}).get("plan_anchor")
+            branch_exists = bool(
+                git(repo, "show-ref", "--verify", expected_ref, check=False)
+            )
+            if branch_exists:
+                anchor_sha = validate_plan_commit(
+                    repo,
+                    ref=expected_ref,
+                    source_base_sha=task["base"]["sha"],
+                    expected_tree_sha=tree_sha,
+                )
+            else:
+                if isinstance(recorded_anchor, dict) and isinstance(
+                    recorded_anchor.get("commit_sha"), str
+                ):
+                    created_sha = validate_plan_commit(
+                        repo,
+                        ref=recorded_anchor["commit_sha"],
+                        source_base_sha=task["base"]["sha"],
+                        expected_tree_sha=tree_sha,
+                    )
+                else:
+                    approved_at = task["artifacts"]["plan_approval"]["approved_at"]
+                    created_sha = create_plan_commit(
+                        repo,
+                        tree_sha=tree_sha,
+                        source_base_sha=task["base"]["sha"],
+                        approved_at=approved_at,
+                    )
+                try:
+                    git(
+                        repo,
+                        "update-ref",
+                        "--create-reflog",
+                        "-m",
+                        "scv: 승인된 계획 문서 고정",
+                        expected_ref,
+                        created_sha,
+                        "",
+                    )
+                except SCVError:
+                    if not git(repo, "show-ref", "--verify", expected_ref, check=False):
+                        raise
+                anchor_sha = validate_plan_commit(
+                    repo,
+                    ref=expected_ref,
+                    source_base_sha=task["base"]["sha"],
+                    expected_tree_sha=tree_sha,
+                )
+
+            manifest_path = (tracked_root / "manifest.json").as_posix()
+            anchor_value = {
+                "branch": branch,
+                "source_base_sha": task["base"]["sha"],
+                "commit_sha": anchor_sha,
+                "tree_sha": tree_sha,
+                "tracked_root": tracked_root.as_posix(),
+                "spec_sha256": spec_metadata["sha256"],
+                "plan_sha256": plan_metadata["sha256"],
+                "manifest_sha256": hashlib.sha256(
+                    tracked_entries[manifest_path]
+                ).hexdigest(),
+                "blob_shas": blob_shas,
+                "recorded_at": utc_now(),
+            }
+            if recorded_anchor is None:
+                task = store.set_artifact(args.task_id, "plan_anchor", anchor_value)
+            elif not isinstance(recorded_anchor, dict) or any(
+                recorded_anchor.get(key) != value
+                for key, value in anchor_value.items()
+                if key != "recorded_at"
+            ):
+                raise SCVError("기록된 계획 앵커가 현재 승인 산출물과 일치하지 않습니다")
+
+            if existing is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                git(repo, "worktree", "add", str(path), branch)
+            elif existing.get("branch") != expected_ref:
                 raise SCVError(
                     f"워크트리 {path}의 브랜치는 "
                     f"{existing.get('branch', '분리된 HEAD')}이며, 필요한 브랜치는 {expected_ref}입니다"
                 )
-            existing_head = git(path, "rev-parse", "HEAD")
-            if existing_head != task["base"]["sha"]:
-                raise SCVError(
-                    f"기존 워크트리 HEAD {existing_head}가 승인된 기준 {task['base']['sha']}와 다릅니다"
-                )
-            if git(path, "status", "--porcelain", "--untracked-files=all"):
-                raise SCVError(f"기존 워크트리 {path}에 커밋되지 않은 변경이 있어 채택할 수 없습니다")
-            if not recovering:
-                store.set_artifact(
-                    args.task_id,
-                    "worktree_intent",
-                    {**desired_intent, "recorded_at": utc_now(), "adopted_existing": True},
-                )
-        else:
-            if explicit_adoption:
-                raise SCVError(f"명시적으로 채택할 기존 워크트리가 없습니다: {path}")
-            containing = next(
-                (
-                    Path(item["worktree"]).resolve()
-                    for item in records
-                    if path.is_relative_to(Path(item["worktree"]).resolve())
-                ),
-                None,
-            )
-            if containing is not None:
-                raise SCVError(f"새 워크트리 경로는 기존 워크트리 {containing} 밖에 있어야 합니다")
-            if path.exists() and any(path.iterdir()):
-                raise SCVError(f"워크트리 경로가 비어 있지 않으며 SCV 관리 대상도 아닙니다: {path}")
-            branch_exists = bool(git(repo, "show-ref", "--verify", expected_ref, check=False))
-            if branch_exists and not recovering:
-                raise SCVError(f"요청한 워크트리 없이 브랜치가 이미 존재합니다: {branch}")
-            if not recovering:
-                store.set_artifact(
-                    args.task_id,
-                    "worktree_intent",
-                    {**desired_intent, "recorded_at": utc_now()},
-                )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if branch_exists:
-                branch_head = git(repo, "rev-parse", expected_ref)
-                if branch_head != task["base"]["sha"]:
+            materialized_head = git(path, "rev-parse", "HEAD")
+            if materialized_head != anchor_sha:
+                raise SCVError("생성된 워크트리 HEAD가 고정된 계획 커밋과 일치하지 않습니다")
+            for tracked_path, expected_bytes in tracked_entries.items():
+                materialized = path / tracked_path
+                if (
+                    materialized.is_symlink()
+                    or not materialized.is_file()
+                    or materialized.read_bytes() != expected_bytes
+                ):
                     raise SCVError(
-                        f"복구할 브랜치 {branch}가 승인된 기준 리비전을 가리키지 않습니다"
+                        f"생성된 워크트리의 승인 문서가 계획 커밋과 일치하지 않습니다: {tracked_path}"
                     )
-                git(repo, "worktree", "add", str(path), branch)
-            else:
-                result = subprocess.run(
-                    [
-                        "git",
-                        "-C",
-                        str(repo),
-                        "worktree",
-                        "add",
-                        "-b",
-                        branch,
-                        str(path),
-                        task["base"]["sha"],
-                    ],
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                )
-                if result.returncode != 0:
-                    raise SCVError(result.stderr.strip() or result.stdout.strip())
-        materialized_head = git(path, "rev-parse", "HEAD")
-        if materialized_head != task["base"]["sha"]:
-            raise SCVError("생성된 워크트리 HEAD가 승인된 기준 리비전과 일치하지 않습니다")
         if git(path, "status", "--porcelain", "--untracked-files=all"):
             raise SCVError("생성된 워크트리가 깨끗하지 않아 실행을 시작할 수 없습니다")
         store.set_worktree(args.task_id, path=str(path), branch=branch)
         return store.transition(
             args.task_id,
             State.EXECUTING,
-            note="계획 승인 후 격리 워크트리를 생성했습니다",
+            note="승인 문서를 계획 커밋으로 고정하고 격리 워크트리를 생성했습니다",
         )
     except Exception as exc:
         latest = store.load(args.task_id)
@@ -734,6 +1156,15 @@ def _command_execute(args: argparse.Namespace, store: TaskStateStore, repo: Path
     root = Path(worktree.get("path", ""))
     if not root.is_dir():
         raise SCVError(f"기록된 워크트리를 사용할 수 없습니다: {root}")
+    try:
+        expected_head = require_execution_workspace(task, root)
+    except SCVError as exc:
+        store.block(
+            args.task_id,
+            reason=safe_reason(exc),
+            resume_from=State.EXECUTING,
+        )
+        raise SCVError(f"{exc}. 태스크를 BLOCKED로 전환했습니다") from exc
     plan = artifact_path(store, args.task_id, "plan.json")
     run_relative = Path("runs") / plan_metadata["sha256"]
     run_dir = store.task_dir(args.task_id) / run_relative
@@ -749,6 +1180,8 @@ def _command_execute(args: argparse.Namespace, store: TaskStateStore, repo: Path
         str(store.state_root.parent / "learning"),
         "--expected-base",
         task["base"]["sha"],
+        "--expected-head",
+        expected_head,
         "--revalidate-ready",
     ]
     if args.timeout is not None:
@@ -837,32 +1270,30 @@ def _command_execute(args: argparse.Namespace, store: TaskStateStore, repo: Path
         raise SCVError(f"실행기가 종료 코드 {result.returncode}로 실패하여 태스크를 BLOCKED로 전환했습니다")
     try:
         with locked_status(run_dir) as evidence:
-            if evidence.get("status") != "ready":
-                store.block(args.task_id, reason="실행 증거 상태가 ready가 아닙니다")
-                raise SCVError(
-                    "실행기가 ready 상태에 도달하지 못해 태스크를 BLOCKED로 전환했습니다"
-                )
             verified_workspace = evidence.get("workspace_sha256")
-            current_workspace = workspace_fingerprint(root)
-            if verified_workspace != current_workspace:
-                store.block(
-                    args.task_id,
-                    reason="실행기 검증 이후 워크트리 내용이 변경되었습니다",
-                    resume_from=State.EXECUTING,
-                )
-                raise SCVError(
-                    "실행기 검증 이후 워크트리가 변경되어 태스크를 BLOCKED로 전환했습니다"
-                )
+            execution_value = {
+                "path": str(run_relative / "index.json"),
+                "plan_sha256": plan_metadata["sha256"],
+                "expected_base_sha": task["base"]["sha"],
+                "expected_head_sha": expected_head,
+                "workspace_sha256": verified_workspace,
+            }
+            require_ready_execution_bindings(
+                evidence,
+                task_id=args.task_id,
+                task=task,
+                plan_metadata=plan_metadata,
+                root=root,
+                execution=execution_value,
+            )
             index_path = run_dir / "index.json"
             index_sha256 = hashlib.sha256(index_path.read_bytes()).hexdigest()
             store.set_artifact(
                 args.task_id,
                 "execution",
                 {
-                    "path": str(run_relative / "index.json"),
-                    "plan_sha256": plan_metadata["sha256"],
+                    **execution_value,
                     "index_sha256": index_sha256,
-                    "workspace_sha256": verified_workspace,
                     "completed_at": utc_now(),
                 },
             )
@@ -875,6 +1306,13 @@ def _command_execute(args: argparse.Namespace, store: TaskStateStore, repo: Path
         raise SCVError(
             "다른 SCV 실행기가 실행 증거를 갱신 중입니다. 현재 태스크 상태는 변경하지 않았습니다"
         ) from exc
+    except SCVError as exc:
+        store.block(
+            args.task_id,
+            reason=safe_reason(f"실행 증거가 올바르지 않습니다: {exc}"),
+            resume_from=State.EXECUTING,
+        )
+        raise SCVError(f"{exc}. 태스크를 BLOCKED로 전환했습니다") from exc
     except (ExecutorError, OSError, ValueError) as exc:
         store.block(
             args.task_id,
@@ -928,29 +1366,25 @@ def _command_handoff(args: argparse.Namespace, store: TaskStateStore, repo: Path
                 raise SCVError(
                     "실행 인덱스가 변경되어 태스크를 BLOCKED로 전환했습니다"
                 ) from exc
-            bindings = {
-                "task_id": args.task_id,
-                "plan_sha256": plan_metadata["sha256"],
-                "expected_base_sha": task["base"]["sha"],
-                "workspace": str(root.resolve()),
-                "workspace_sha256": execution.get("workspace_sha256"),
-            }
-            if any(evidence.get(name) != value for name, value in bindings.items()):
+            try:
+                require_ready_execution_bindings(
+                    evidence,
+                    task_id=args.task_id,
+                    task=task,
+                    plan_metadata=plan_metadata,
+                    root=root,
+                    execution=execution,
+                )
+            except SCVError as exc:
                 store.block(
                     args.task_id,
-                    reason="실행 증거의 태스크·계획·기준·워크트리 연결이 일치하지 않습니다",
+                    reason=safe_reason(exc),
                     resume_from=State.EXECUTING,
                 )
                 raise SCVError(
-                    "실행 증거가 현재 태스크와 연결되지 않아 태스크를 BLOCKED로 전환했습니다"
-                )
-            if evidence.get("status") != "ready":
-                store.block(
-                    args.task_id,
-                    reason="인계할 실행 증거 상태가 ready가 아닙니다",
-                    resume_from=State.EXECUTING,
-                )
-                raise SCVError("실행 증거가 ready 상태가 아니어서 태스크를 BLOCKED로 전환했습니다")
+                    f"{exc}. 실행 증거가 현재 태스크와 연결되지 않아 "
+                    "태스크를 BLOCKED로 전환했습니다"
+                ) from exc
             return _record_handoff(
                 args=args,
                 store=store,
@@ -983,16 +1417,18 @@ def _record_handoff(
     evidence: dict[str, Any],
     execution: dict[str, Any],
 ) -> dict[str, Any]:
-    head = git(root, "rev-parse", "HEAD")
-    if head.lower() != task["base"]["sha"].lower():
+    expected_head = execution_head_sha(task)
+    try:
+        head = require_execution_workspace(task, root)
+    except SCVError as exc:
         store.block(
             args.task_id,
-            reason="실행 검증 이후 워크트리 HEAD가 승인된 기준에서 변경되었습니다",
+            reason=safe_reason(exc),
             resume_from=State.EXECUTING,
         )
         raise SCVError(
-            "실행 검증 이후 워크트리 HEAD가 변경되어 태스크를 BLOCKED로 전환했습니다"
-        )
+            "실행 검증 이후 워크트리 HEAD 또는 승인 문서가 변경되어 태스크를 BLOCKED로 전환했습니다"
+        ) from exc
     current_workspace = workspace_fingerprint(root)
     if execution.get("workspace_sha256") != current_workspace:
         store.block(
@@ -1038,7 +1474,8 @@ def _record_handoff(
         "",
         f"- 상태: READY",
         f"- 목표: {task['target']}",
-        f"- 기준: `{task['base']['branch']}`의 `{task['base']['sha']}`",
+        f"- 소스 기준: `{task['base']['branch']}`의 `{task['base']['sha']}`",
+        f"- 고정 실행 HEAD: `{expected_head}`",
         f"- 워크트리 HEAD: `{head}`",
         f"- 브랜치: `{task['worktree']['branch']}`",
         f"- 워크트리: `{root}`",
@@ -1140,14 +1577,16 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("task_id", metavar="태스크-ID")
     plan.add_argument("--plan", required=True, metavar="계획-파일", help="제출할 계획 JSON 경로")
 
-    materialize = subparsers.add_parser("materialize", help="승인 후 격리 워크트리를 생성합니다")
+    materialize = subparsers.add_parser(
+        "materialize", help="승인 문서 커밋과 격리 워크트리를 생성합니다"
+    )
     materialize.add_argument("task_id", metavar="태스크-ID")
     materialize.add_argument("--worktree", metavar="워크트리", help="생성하거나 채택할 워크트리 경로")
     materialize.add_argument("--branch", metavar="브랜치", help="생성하거나 채택할 작업 브랜치")
     materialize.add_argument(
         "--adopt-existing",
         action="store_true",
-        help="사용자가 지정한 기존 워크트리를 엄격히 확인한 뒤 채택합니다",
+        help="고정된 계획 커밋과 정확히 일치하는 기존 워크트리를 채택합니다",
     )
 
     abandon = subparsers.add_parser("abandon", help="태스크를 포기 상태로 기록합니다")
