@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:scv:schema:handoff:1.0.0",
+  "title": "SCV handoff artifact",
+  "type": "object",
+  "required": ["schemaVersion", "taskId", "generatedAt", "summary", "changedPaths", "verification", "findingIds", "acceptedRiskIds", "adrIds", "nextActions", "planDigest", "approvalDigest", "workspaceCheckpointDigest", "outputArtifact", "readyGate"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "taskId": { "$ref": "#/$defs/taskId" },
+    "generatedAt": { "$ref": "#/$defs/utcDateTime" },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "changedPaths": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/portablePath" }
+    },
+    "verification": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "evidenceIds"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "status": { "enum": ["pass", "fail", "blocked"] },
+          "evidenceIds": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^evidence-[0-9]{6}-[0-9a-f]{8}$" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "findingIds": { "$ref": "#/$defs/findingIds" },
+    "acceptedRiskIds": { "$ref": "#/$defs/findingIds" },
+    "adrIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/adrId" }
+    },
+    "nextActions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "planDigest": { "$ref": "#/$defs/digest" },
+    "approvalDigest": { "$ref": "#/$defs/digest" },
+    "workspaceCheckpointDigest": { "$ref": "#/$defs/digest" },
+    "outputArtifact": { "$ref": "#/$defs/portablePath" },
+    "readyGate": {
+      "type": "object",
+      "required": ["eligible", "unmetConditions"],
+      "properties": {
+        "eligible": { "type": "boolean" },
+        "unmetConditions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "eligible": { "const": true } }, "required": ["eligible"] },
+          "then": { "properties": { "unmetConditions": { "maxItems": 0 } } },
+          "else": { "properties": { "unmetConditions": { "minItems": 1 } } }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "readyGate": {
+            "properties": { "eligible": { "const": true } },
+            "required": ["eligible"]
+          }
+        },
+        "required": ["readyGate"]
+      },
+      "then": {
+        "properties": {
+          "verification": {
+            "items": {
+              "properties": { "status": { "const": "pass" } },
+              "required": ["status"]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "taskId": { "type": "string", "pattern": "^T-[0-9]{8}T[0-9]{6}Z-[a-z2-7]{26}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "utcDateTime": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,9})?Z$" },
+    "adrId": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^ADR-T-[0-9]{8}T[0-9]{6}Z-[a-z2-7]{26}-(?:0[1-9]|[1-9][0-9])-[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+        },
+        {
+          "type": "string",
+          "pattern": "^ADR-0001-[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+        }
+      ]
+    },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\.\\.(?:/|$))(?!.*(?:/)\\.\\.(?:/|$))(?!.*//)(?!.*\\\\)[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$"
+    },
+    "findingIds": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^finding-[a-z0-9][a-z0-9-]{0,63}$" }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,125 @@
+{
+  "schema": "workflow-policy.schema.json",
+  "generatedInvalid": [
+    {"operation": "replace", "pointer": "/schemaVersion", "value": "9.9.9"},
+    {"operation": "add", "pointer": "/unknownField", "value": true}
+  ],
+  "valid": [
+    {
+      "schemaVersion": "1.0.0",
+      "transitions": {
+        "PLANNING": ["AWAITING_APPROVAL", "BLOCKED", "ABANDONED"],
+        "AWAITING_APPROVAL": ["PLANNING", "PLAN_READY", "BLOCKED", "ABANDONED"],
+        "PLAN_READY": ["EXECUTING", "PLANNING", "BLOCKED", "ABANDONED"],
+        "EXECUTING": ["VERIFYING", "PLANNING", "BLOCKED", "ABANDONED"],
+        "VERIFYING": ["EXECUTING", "PLANNING", "HANDOFF_READY", "BLOCKED", "ABANDONED"],
+        "HANDOFF_READY": ["EXECUTING", "PLANNING", "READY", "BLOCKED", "ABANDONED"],
+        "BLOCKED": ["PLANNING", "AWAITING_APPROVAL", "PLAN_READY", "EXECUTING", "VERIFYING", "HANDOFF_READY", "ABANDONED"],
+        "READY": [],
+        "ABANDONED": []
+      },
+      "blockedResume": {
+        "sameStateReasons": ["BACKEND_UNAVAILABLE", "HOST_INCOMPATIBLE", "SANDBOX_UNAVAILABLE", "POLICY_DENIED", "CREDENTIAL_UNAVAILABLE", "BINDING_MISMATCH", "EVIDENCE_CORRUPT", "STATE_CORRUPT"],
+        "sameStateResumeTo": "blockedFrom",
+        "workspaceDrift": {"reasonCode": "WORKSPACE_DRIFT", "exactRestoreResumeTo": "blockedFrom", "rebaselineResumeTo": "PLANNING"},
+        "abandon": {"targetState": "ABANDONED", "requiresUserConfirmation": true, "usesResumeTo": false}
+      },
+      "planning": {
+        "stages": ["CONTEXT", "DIALOGUE", "OPTIONS", "DESIGN_REVIEW", "PLAN_REVIEW"],
+        "requireExplicitAssumptionAcceptance": true
+      },
+      "attempts": {
+        "minimum": 1,
+        "default": 2,
+        "maximum": 3,
+        "terminationReasons": ["budget_exhausted", "stalled", "oscillating", "verifier_disagreement"]
+      },
+      "findings": {
+        "severityDisposition": {
+          "critical": "must_fix",
+          "high": "must_fix",
+          "medium": "waivable",
+          "low": "advisory"
+        },
+        "nonWaivableClasses": ["security_boundary", "data_loss", "scope_violation", "sandbox_failure", "acceptance_failure"]
+      },
+      "executors": { "allowed": ["host", "kernel", "backend"], "reviewBackend": "codex" },
+      "retention": { "automaticDeletion": false, "terminalTaskDaysBeforePrune": 90, "runtimeCleanupDays": 7 }
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "transitions": {
+        "PLANNING": ["AWAITING_APPROVAL", "BLOCKED", "ABANDONED"],
+        "AWAITING_APPROVAL": ["PLANNING", "PLAN_READY", "BLOCKED", "ABANDONED"],
+        "PLAN_READY": ["EXECUTING", "PLANNING", "BLOCKED", "ABANDONED"],
+        "EXECUTING": ["VERIFYING", "PLANNING", "BLOCKED", "ABANDONED"],
+        "VERIFYING": ["EXECUTING", "PLANNING", "HANDOFF_READY", "BLOCKED", "ABANDONED"],
+        "HANDOFF_READY": ["EXECUTING", "PLANNING", "READY", "BLOCKED", "ABANDONED"],
+        "BLOCKED": ["PLANNING", "AWAITING_APPROVAL", "PLAN_READY", "EXECUTING", "VERIFYING", "HANDOFF_READY", "ABANDONED"],
+        "READY": [],
+        "ABANDONED": []
+      },
+      "blockedResume": {
+        "sameStateReasons": ["BACKEND_UNAVAILABLE", "HOST_INCOMPATIBLE", "SANDBOX_UNAVAILABLE", "POLICY_DENIED", "CREDENTIAL_UNAVAILABLE", "BINDING_MISMATCH", "EVIDENCE_CORRUPT", "STATE_CORRUPT"],
+        "sameStateResumeTo": "blockedFrom",
+        "workspaceDrift": {"reasonCode": "WORKSPACE_DRIFT", "exactRestoreResumeTo": "blockedFrom", "rebaselineResumeTo": "PLANNING"},
+        "abandon": {"targetState": "ABANDONED", "requiresUserConfirmation": true, "usesResumeTo": false}
+      },
+      "planning": {
+        "stages": ["CONTEXT", "DIALOGUE", "OPTIONS", "DESIGN_REVIEW", "PLAN_REVIEW"],
+        "requireExplicitAssumptionAcceptance": true
+      },
+      "attempts": {
+        "minimum": 1,
+        "default": 1,
+        "maximum": 3,
+        "terminationReasons": ["budget_exhausted", "stalled", "oscillating", "verifier_disagreement"]
+      },
+      "findings": {
+        "severityDisposition": {
+          "critical": "must_fix",
+          "high": "must_fix",
+          "medium": "must_fix",
+          "low": "advisory"
+        },
+        "nonWaivableClasses": ["security_boundary", "data_loss", "scope_violation", "sandbox_failure", "acceptance_failure"]
+      },
+      "executors": { "allowed": ["host", "kernel", "backend"], "reviewBackend": "codex" },
+      "retention": { "automaticDeletion": false, "terminalTaskDaysBeforePrune": 36500, "runtimeCleanupDays": 36500 }
+    }
+  ],
+  "invalid": [
+    { "schemaVersion": "2.0.0" },
+    { "schemaVersion": "1.0.0", "unexpected": true },
+    { "schemaVersion": "1.0.0", "transitions": { "PLANNING": ["READY"] } },
+    { "schemaVersion": "1.0.0", "attempts": { "minimum": 1, "default": 0, "maximum": 3, "terminationReasons": ["budget_exhausted", "stalled", "oscillating", "verifier_disagreement"] } },
+    {
+      "schemaVersion": "1.0.0",
+      "transitions": {
+        "PLANNING": ["AWAITING_APPROVAL", "BLOCKED", "ABANDONED"],
+        "AWAITING_APPROVAL": ["PLANNING", "PLAN_READY", "BLOCKED", "ABANDONED"],
+        "PLAN_READY": ["EXECUTING", "PLANNING", "BLOCKED", "ABANDONED"],
+        "EXECUTING": ["VERIFYING", "PLANNING", "BLOCKED", "ABANDONED"],
+        "VERIFYING": ["EXECUTING", "PLANNING", "HANDOFF_READY", "BLOCKED", "ABANDONED"],
+        "HANDOFF_READY": ["EXECUTING", "PLANNING", "READY", "BLOCKED", "ABANDONED"],
+        "BLOCKED": ["PLANNING", "AWAITING_APPROVAL", "PLAN_READY", "EXECUTING", "VERIFYING", "HANDOFF_READY", "ABANDONED"],
+        "READY": [],
+        "ABANDONED": []
+      },
+      "blockedResume": {
+        "sameStateReasons": ["BACKEND_UNAVAILABLE", "HOST_INCOMPATIBLE", "SANDBOX_UNAVAILABLE", "POLICY_DENIED", "CREDENTIAL_UNAVAILABLE", "BINDING_MISMATCH", "EVIDENCE_CORRUPT", "STATE_CORRUPT"],
+        "sameStateResumeTo": "blockedFrom",
+        "workspaceDrift": {"reasonCode": "WORKSPACE_DRIFT", "exactRestoreResumeTo": "blockedFrom", "rebaselineResumeTo": "PLANNING"},
+        "abandon": {"targetState": "ABANDONED", "requiresUserConfirmation": false, "usesResumeTo": false}
+      },
+      "planning": {"stages": ["CONTEXT", "DIALOGUE", "OPTIONS", "DESIGN_REVIEW", "PLAN_REVIEW"], "requireExplicitAssumptionAcceptance": true},
+      "attempts": {"minimum": 1, "default": 2, "maximum": 3, "terminationReasons": ["budget_exhausted", "stalled", "oscillating", "verifier_disagreement"]},
+      "findings": {
+        "severityDisposition": {"critical": "must_fix", "high": "must_fix", "medium": "waivable", "low": "advisory"},
+        "nonWaivableClasses": ["security_boundary", "data_loss", "scope_violation", "sandbox_failure", "acceptance_failure"]
+      },
+      "executors": {"allowed": ["host", "kernel", "backend"], "reviewBackend": "codex"},
+      "retention": {"automaticDeletion": false, "terminalTaskDaysBeforePrune": 90, "runtimeCleanupDays": 7}
+    }
+  ]
+}

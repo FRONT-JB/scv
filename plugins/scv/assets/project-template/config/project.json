@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "1.0.0",
+  "projectId": "{{SCV_PROJECT_ID}}",
+  "displayName": "{{SCV_PROJECT_NAME}}",
+  "defaultLanguage": "ko",
+  "layoutVersion": "1.0.0"
+}

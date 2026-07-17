@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:scv:schema:link-manifest:1.0.0",
+  "title": "SCV project skill link manifest",
+  "type": "object",
+  "required": ["schemaVersion", "installationId", "mode", "sourceBundleDigest", "validatedAt", "links"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "installationId": { "$ref": "#/$defs/uuid" },
+    "mode": { "enum": ["linked", "installed", "cutover_pending"] },
+    "sourceBundleDigest": { "$ref": "#/$defs/digest" },
+    "validatedAt": { "$ref": "#/$defs/utcDateTime" },
+    "links": {
+      "type": "array",
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/link" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "installed" } }, "required": ["mode"] },
+      "then": { "properties": { "links": { "maxItems": 0 } } }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "linked" } }, "required": ["mode"] },
+      "then": {
+        "properties": {
+          "links": {
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "allOf": [
+                { "$ref": "#/$defs/link" },
+                { "properties": { "status": { "const": "valid" } } }
+              ]
+            },
+            "allOf": [
+              { "contains": { "$ref": "#/$defs/codexSetup" }, "minContains": 1, "maxContains": 1 },
+              { "contains": { "$ref": "#/$defs/codexPlan" }, "minContains": 1, "maxContains": 1 },
+              { "contains": { "$ref": "#/$defs/claudeSetup" }, "minContains": 1, "maxContains": 1 },
+              { "contains": { "$ref": "#/$defs/claudePlan" }, "minContains": 1, "maxContains": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "cutover_pending" } }, "required": ["mode"] },
+      "then": {
+        "properties": {
+          "links": {
+            "minItems": 1,
+            "maxItems": 4,
+            "allOf": [
+              { "contains": { "$ref": "#/$defs/codexSetup" }, "minContains": 0, "maxContains": 1 },
+              { "contains": { "$ref": "#/$defs/codexPlan" }, "minContains": 0, "maxContains": 1 },
+              { "contains": { "$ref": "#/$defs/claudeSetup" }, "minContains": 0, "maxContains": 1 },
+              { "contains": { "$ref": "#/$defs/claudePlan" }, "minContains": 0, "maxContains": 1 }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "utcDateTime": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,9})?Z$" },
+    "link": {
+      "type": "object",
+      "required": ["host", "skillId", "linkPath", "targetPath", "targetDigest", "status"],
+      "properties": {
+        "host": { "enum": ["codex", "claude"] },
+        "skillId": { "enum": ["setup", "scv-1-plan"] },
+        "linkPath": {
+          "enum": [
+            ".agents/skills/setup",
+            ".agents/skills/scv-1-plan",
+            ".claude/skills/setup",
+            ".claude/skills/scv-1-plan"
+          ]
+        },
+        "targetPath": {
+          "enum": [
+            "../../.scv/plugin/skills/setup",
+            "../../.scv/plugin/skills/scv-1-plan"
+          ]
+        },
+        "targetDigest": { "$ref": "#/$defs/digest" },
+        "status": { "enum": ["valid", "missing", "conflict"] }
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/codexSetup" },
+        { "$ref": "#/$defs/codexPlan" },
+        { "$ref": "#/$defs/claudeSetup" },
+        { "$ref": "#/$defs/claudePlan" }
+      ],
+      "additionalProperties": false
+    },
+    "codexSetup": {
+      "required": ["host", "skillId", "linkPath", "targetPath"],
+      "properties": {
+        "host": { "const": "codex" },
+        "skillId": { "const": "setup" },
+        "linkPath": { "const": ".agents/skills/setup" },
+        "targetPath": { "const": "../../.scv/plugin/skills/setup" }
+      }
+    },
+    "codexPlan": {
+      "required": ["host", "skillId", "linkPath", "targetPath"],
+      "properties": {
+        "host": { "const": "codex" },
+        "skillId": { "const": "scv-1-plan" },
+        "linkPath": { "const": ".agents/skills/scv-1-plan" },
+        "targetPath": { "const": "../../.scv/plugin/skills/scv-1-plan" }
+      }
+    },
+    "claudeSetup": {
+      "required": ["host", "skillId", "linkPath", "targetPath"],
+      "properties": {
+        "host": { "const": "claude" },
+        "skillId": { "const": "setup" },
+        "linkPath": { "const": ".claude/skills/setup" },
+        "targetPath": { "const": "../../.scv/plugin/skills/setup" }
+      }
+    },
+    "claudePlan": {
+      "required": ["host", "skillId", "linkPath", "targetPath"],
+      "properties": {
+        "host": { "const": "claude" },
+        "skillId": { "const": "scv-1-plan" },
+        "linkPath": { "const": ".claude/skills/scv-1-plan" },
+        "targetPath": { "const": "../../.scv/plugin/skills/scv-1-plan" }
+      }
+    }
+  },
+  "additionalProperties": false
+}

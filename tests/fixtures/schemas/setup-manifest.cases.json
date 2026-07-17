@@ -1,0 +1,195 @@
+{
+  "schema": "setup-manifest.schema.json",
+  "generatedInvalid": [
+    {"operation": "replace", "pointer": "/schemaVersion", "value": "9.9.9"},
+    {"operation": "add", "pointer": "/unknownField", "value": true}
+  ],
+  "valid": [
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [
+        { "path": ".agents/skills/setup", "kind": "symlink", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "targetPath": "../../.scv/plugin/skills/setup", "ownership": "managed", "tracked": true }
+      ]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "00000000-0000-4000-8000-000000000000",
+      "pluginVersion": "0.0.0-dev.1",
+      "mode": "installed",
+      "sourceBundleDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "installedBundleDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "createdAt": "2026-07-17T00:00:00Z",
+      "updatedAt": "2026-07-17T00:00:00Z",
+      "managedEntries": [
+        { "path": ".scv/plugin", "kind": "directory", "digest": null, "targetPath": null, "ownership": "preserved", "tracked": false }
+      ]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [
+        { "path": ".scv/config/project.json", "kind": "file", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "targetPath": null, "ownership": "managed", "tracked": true }
+      ]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [
+        { "path": ".scv/plugin/scripts/scv.py", "kind": "file", "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "targetPath": null, "ownership": "managed", "tracked": true }
+      ]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [
+        { "path": ".scv/config/setup-manifest.json", "kind": "file", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444", "targetPath": null, "ownership": "managed", "tracked": false }
+      ]
+    }
+  ],
+  "invalid": [
+    {
+      "schemaVersion": "2.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".scv/config/project.json", "kind": "file", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "targetPath": null, "ownership": "managed", "tracked": true }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".scv/config/project.json", "kind": "file", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "targetPath": null, "ownership": "managed", "tracked": true }],
+      "unexpected": true
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".git/config", "kind": "file", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "targetPath": null, "ownership": "managed", "tracked": true }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".scv/config/project.json", "kind": "file", "digest": null, "targetPath": null, "ownership": "managed", "tracked": true }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".agents/skills/setup", "kind": "symlink", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "targetPath": "../../.scv/plugin/skills/scv-1-plan", "ownership": "managed", "tracked": true }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".agents/skills/setup", "kind": "symlink", "digest": null, "targetPath": "../../.scv/plugin/skills/setup", "ownership": "managed", "tracked": true }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".scv/tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/state.json", "kind": "file", "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "targetPath": null, "ownership": "managed", "tracked": true }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".scv/plugin/scripts/scv.py", "kind": "file", "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "targetPath": null, "ownership": "managed", "tracked": false }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+      "pluginVersion": "1.0.0",
+      "mode": "linked",
+      "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "createdAt": "2026-07-17T01:02:03Z",
+      "updatedAt": "2026-07-17T01:02:04Z",
+      "managedEntries": [{ "path": ".scv/config/setup-manifest.json", "kind": "file", "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444", "targetPath": null, "ownership": "managed", "tracked": true }]
+    }
+  ],
+  "semanticInvalid": [
+    {
+      "reason": "duplicate-managed-path",
+      "manifest": {
+        "schemaVersion": "1.0.0",
+        "installationId": "d7aa2b62-8937-46b2-a21d-334ccf25e503",
+        "pluginVersion": "1.0.0",
+        "mode": "linked",
+        "sourceBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "installedBundleDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "createdAt": "2026-07-17T01:02:03Z",
+        "updatedAt": "2026-07-17T01:02:04Z",
+        "managedEntries": [
+          { "path": ".agents/skills/setup", "kind": "symlink", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "targetPath": "../../.scv/plugin/skills/setup", "ownership": "managed", "tracked": true },
+          { "path": ".agents/skills/setup", "kind": "symlink", "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "targetPath": "../../.scv/plugin/skills/setup", "ownership": "managed", "tracked": true }
+        ]
+      }
+    }
+  ]
+}

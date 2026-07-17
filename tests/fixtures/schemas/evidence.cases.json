@@ -1,0 +1,210 @@
+{
+  "schema": "evidence.schema.json",
+  "generatedInvalid": [
+    {"operation": "replace", "pointer": "/schemaVersion", "value": "9.9.9"},
+    {"operation": "add", "pointer": "/unknownField", "value": true}
+  ],
+  "valid": [
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-000001-a1b2c3d4",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "sequence": 1,
+      "attempt": 1,
+      "kind": "backend",
+      "operationId": "implement-step",
+      "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": ["codex", "exec", "--model", "<resolved-model>", "<operation-prompt>"],
+      "producer": {
+        "executor": "backend",
+        "host": "codex",
+        "modelProfileId": "implementation",
+        "referenceDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "result": {
+        "status": "pass",
+        "exitCode": 0,
+        "durationMs": 1250,
+        "timedOut": false,
+        "stdoutDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "stderrDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "sandboxProfileDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "artifacts": [
+        {
+          "path": "tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/output.json",
+          "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "mediaType": "application/json",
+          "sizeBytes": 2048
+        }
+      ]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-999999-00000000",
+      "taskId": "T-20260717T010203Z-22222222222222222222222222",
+      "sequence": 999999,
+      "attempt": 3,
+      "kind": "verifier",
+      "operationId": "x",
+      "recordedAt": "2026-07-17T23:59:59Z",
+      "argvTemplate": ["python3", "-m", "unittest"],
+      "producer": {
+        "executor": "kernel",
+        "host": null,
+        "modelProfileId": null,
+        "referenceDigest": null,
+        "schemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "result": {
+        "status": "blocked",
+        "exitCode": null,
+        "durationMs": 0,
+        "timedOut": false,
+        "stdoutDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "stderrDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "sandboxProfileDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "artifacts": []
+    }
+  ],
+  "invalid": [
+    { "schemaVersion": "2.0.0" },
+    { "schemaVersion": "1.0.0", "unexpected": true },
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-000001-a1b2c3d4",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "sequence": 1,
+      "attempt": 0,
+      "kind": "backend",
+      "operationId": "implement-step",
+      "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": ["codex", "exec", "<operation-prompt>"],
+      "producer": { "executor": "kernel", "host": null, "modelProfileId": null, "referenceDigest": null, "schemaDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      "result": { "status": "pass", "exitCode": 0, "durationMs": 1, "timedOut": false, "stdoutDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "stderrDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sandboxProfileDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      "artifacts": []
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-000001-a1b2c3d4",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "sequence": 1,
+      "attempt": 1,
+      "kind": "artifact",
+      "operationId": "seal-artifact",
+      "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": ["scv-kernel", "seal-artifact"],
+      "producer": { "executor": "kernel", "host": null, "modelProfileId": null, "referenceDigest": null, "schemaDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      "result": { "status": "pass", "exitCode": 0, "durationMs": 1, "timedOut": false, "stdoutDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "stderrDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sandboxProfileDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      "artifacts": [{ "path": "/tmp/output.json", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mediaType": "application/json", "sizeBytes": 1 }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-000001-a1b2c3d4",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "sequence": 1,
+      "attempt": 1,
+      "kind": "backend",
+      "operationId": "implement-step",
+      "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": [],
+      "producer": { "executor": "backend", "host": "codex", "modelProfileId": "implementation", "referenceDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+      "result": { "status": "pass", "exitCode": 0, "durationMs": 1250, "timedOut": false, "stdoutDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "stderrDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "sandboxProfileDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+      "artifacts": [{ "path": "tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/output.json", "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mediaType": "application/json", "sizeBytes": 2048 }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-000001-a1b2c3d4",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "sequence": 1,
+      "attempt": 1,
+      "kind": "backend",
+      "operationId": "implement-step",
+      "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": ["codex", "exec", "--model", "<resolved-model>", "<operation-prompt>"],
+      "producer": { "executor": "backend", "host": null, "modelProfileId": "implementation", "referenceDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+      "result": { "status": "pass", "exitCode": 0, "durationMs": 1250, "timedOut": false, "stdoutDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "stderrDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "sandboxProfileDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+      "artifacts": [{ "path": "tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/output.json", "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mediaType": "application/json", "sizeBytes": 2048 }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-999999-00000000",
+      "taskId": "T-20260717T010203Z-22222222222222222222222222",
+      "sequence": 999999,
+      "attempt": 3,
+      "kind": "verifier",
+      "operationId": "x",
+      "recordedAt": "2026-07-17T23:59:59Z",
+      "argvTemplate": ["python3", "-m", "unittest"],
+      "producer": { "executor": "kernel", "host": "codex", "modelProfileId": null, "referenceDigest": null, "schemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+      "result": { "status": "blocked", "exitCode": null, "durationMs": 0, "timedOut": false, "stdoutDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "stderrDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "sandboxProfileDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+      "artifacts": []
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-000001-a1b2c3d4",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "sequence": 1,
+      "attempt": 1,
+      "kind": "backend",
+      "operationId": "implement-step",
+      "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": ["codex", "exec", "--model", "<resolved-model>", "<operation-prompt>"],
+      "producer": { "executor": "backend", "host": "codex", "modelProfileId": "implementation", "referenceDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+      "result": { "status": "pass", "exitCode": 1, "durationMs": 1250, "timedOut": false, "stdoutDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "stderrDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "sandboxProfileDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
+      "artifacts": [{ "path": "tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/output.json", "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mediaType": "application/json", "sizeBytes": 2048 }]
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "evidenceId": "evidence-999999-00000000",
+      "taskId": "T-20260717T010203Z-22222222222222222222222222",
+      "sequence": 999999,
+      "attempt": 3,
+      "kind": "verifier",
+      "operationId": "x",
+      "recordedAt": "2026-07-17T23:59:59Z",
+      "argvTemplate": ["python3", "-m", "unittest"],
+      "producer": { "executor": "kernel", "host": null, "modelProfileId": null, "referenceDigest": null, "schemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+      "result": { "status": "blocked", "exitCode": 0, "durationMs": 0, "timedOut": false, "stdoutDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "stderrDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "sandboxProfileDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+      "artifacts": []
+    },
+    {
+      "schemaVersion": "1.0.0", "evidenceId": "evidence-000001-a1b2c3d4", "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz", "sequence": 1, "attempt": 1, "kind": "backend", "operationId": "implement-step", "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": ["codex", "exec", "--model", "<resolved-model>", "<operation-prompt>"],
+      "producer": { "executor": "backend", "host": "codex", "modelProfileId": null, "referenceDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+      "result": { "status": "pass", "exitCode": 0, "durationMs": 1250, "timedOut": false, "stdoutDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "stderrDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "sandboxProfileDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }, "artifacts": [{ "path": "tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/output.json", "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mediaType": "application/json", "sizeBytes": 2048 }]
+    },
+    {
+      "schemaVersion": "1.0.0", "evidenceId": "evidence-000001-a1b2c3d4", "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz", "sequence": 1, "attempt": 1, "kind": "backend", "operationId": "implement-step", "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": ["codex", "exec", "--model", "<resolved-model>", "<operation-prompt>"],
+      "producer": { "executor": "backend", "host": "codex", "modelProfileId": "implementation", "referenceDigest": null, "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+      "result": { "status": "pass", "exitCode": 0, "durationMs": 1250, "timedOut": false, "stdoutDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "stderrDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "sandboxProfileDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }, "artifacts": [{ "path": "tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/output.json", "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mediaType": "application/json", "sizeBytes": 2048 }]
+    },
+    {
+      "schemaVersion": "1.0.0", "evidenceId": "evidence-999999-00000000", "taskId": "T-20260717T010203Z-22222222222222222222222222", "sequence": 999999, "attempt": 3, "kind": "verifier", "operationId": "x", "recordedAt": "2026-07-17T23:59:59Z",
+      "argvTemplate": ["python3", "-m", "unittest"],
+      "producer": { "executor": "kernel", "host": null, "modelProfileId": "implementation", "referenceDigest": null, "schemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+      "result": { "status": "blocked", "exitCode": null, "durationMs": 0, "timedOut": false, "stdoutDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "stderrDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "sandboxProfileDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }, "artifacts": []
+    },
+    {
+      "schemaVersion": "1.0.0", "evidenceId": "evidence-999999-00000000", "taskId": "T-20260717T010203Z-22222222222222222222222222", "sequence": 999999, "attempt": 3, "kind": "verifier", "operationId": "x", "recordedAt": "2026-07-17T23:59:59Z",
+      "argvTemplate": ["python3", "-m", "unittest"],
+      "producer": { "executor": "kernel", "host": null, "modelProfileId": null, "referenceDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "schemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+      "result": { "status": "blocked", "exitCode": null, "durationMs": 0, "timedOut": false, "stdoutDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "stderrDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "sandboxProfileDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }, "artifacts": []
+    },
+    {
+      "schemaVersion": "1.0.0", "evidenceId": "evidence-000001-a1b2c3d4", "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz", "sequence": 1, "attempt": 1, "kind": "backend", "operationId": "implement-step", "recordedAt": "2026-07-17T01:02:03Z",
+      "argvTemplate": ["codex", "exec", "--model", "<resolved-model>", "<operation-prompt>"],
+      "producer": { "executor": "backend", "host": "codex", "modelProfileId": "implementation", "referenceDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "schemaDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+      "result": { "status": "pass", "exitCode": 0, "durationMs": 1250, "timedOut": true, "stdoutDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "stderrDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "sandboxProfileDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" }, "artifacts": [{ "path": "tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/output.json", "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "mediaType": "application/json", "sizeBytes": 2048 }]
+    },
+    {
+      "schemaVersion": "1.0.0", "evidenceId": "evidence-999999-00000000", "taskId": "T-20260717T010203Z-22222222222222222222222222", "sequence": 999999, "attempt": 3, "kind": "verifier", "operationId": "x", "recordedAt": "2026-07-17T23:59:59Z",
+      "argvTemplate": ["python3", "-m", "unittest"],
+      "producer": { "executor": "kernel", "host": null, "modelProfileId": null, "referenceDigest": null, "schemaDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" },
+      "result": { "status": "blocked", "exitCode": null, "durationMs": 0, "timedOut": true, "stdoutDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "stderrDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "sandboxProfileDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000" }, "artifacts": []
+    }
+  ]
+}

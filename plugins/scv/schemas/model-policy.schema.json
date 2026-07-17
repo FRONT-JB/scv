@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:scv:schema:model-policy:1.0.0",
+  "title": "SCV logical model policy",
+  "type": "object",
+  "required": ["schemaVersion", "roles", "ollama", "review"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "roles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["roleId", "capabilityTier", "allowedOperations", "fallbackRoleIds", "ollamaEligible"],
+        "properties": {
+          "roleId": { "$ref": "#/$defs/roleId" },
+          "capabilityTier": { "enum": ["sol", "terra", "luna"] },
+          "allowedOperations": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/operationId" }
+          },
+          "fallbackRoleIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "$ref": "#/$defs/roleId" }
+          },
+          "ollamaEligible": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "ollama": {
+      "type": "object",
+      "required": ["enabled", "qualifiedProfiles"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "qualifiedProfiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["operationId", "modelDigest", "promptDigest", "schemaVersion", "fixtureCount", "schemaValidity", "factualAccuracy", "criticalFactualErrors", "retryRate", "savingsMetric", "savingsRatio", "p95LatencyRatio"],
+            "properties": {
+              "operationId": { "$ref": "#/$defs/operationId" },
+              "modelDigest": { "$ref": "#/$defs/digest" },
+              "promptDigest": { "$ref": "#/$defs/digest" },
+              "schemaVersion": { "const": "1.0.0" },
+              "fixtureCount": { "type": "integer", "minimum": 100 },
+              "schemaValidity": { "type": "number", "minimum": 0.99, "maximum": 1 },
+              "factualAccuracy": { "type": "number", "minimum": 0.95, "maximum": 1 },
+              "criticalFactualErrors": { "const": 0 },
+              "retryRate": { "type": "number", "minimum": 0, "maximum": 0.02 },
+              "savingsMetric": { "enum": ["input_tokens", "paid_calls"] },
+              "savingsRatio": { "type": "number", "minimum": 0.3, "maximum": 1 },
+              "p95LatencyRatio": { "type": "number", "exclusiveMinimum": 0, "maximum": 1.2 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+          "then": { "properties": { "qualifiedProfiles": { "minItems": 1 } } }
+        }
+      ]
+    },
+    "review": {
+      "type": "object",
+      "required": ["requiredBackend"],
+      "properties": { "requiredBackend": { "const": "codex" } },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "operationId": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+    "roleId": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  },
+  "additionalProperties": false
+}

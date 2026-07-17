@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:scv:schema:evidence:1.0.0",
+  "title": "SCV sealed execution evidence",
+  "type": "object",
+  "required": ["schemaVersion", "evidenceId", "taskId", "sequence", "attempt", "kind", "operationId", "recordedAt", "argvTemplate", "producer", "result", "artifacts"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "evidenceId": { "type": "string", "pattern": "^evidence-[0-9]{6}-[0-9a-f]{8}$" },
+    "taskId": { "$ref": "#/$defs/taskId" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 3 },
+    "kind": { "enum": ["command", "backend", "verifier", "artifact"] },
+    "operationId": { "$ref": "#/$defs/operationId" },
+    "recordedAt": { "$ref": "#/$defs/utcDateTime" },
+    "argvTemplate": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    },
+    "producer": {
+      "type": "object",
+      "required": ["executor", "host", "modelProfileId", "referenceDigest", "schemaDigest"],
+      "properties": {
+        "executor": { "enum": ["kernel", "backend"] },
+        "host": { "enum": [null, "codex", "claude", "ollama"] },
+        "modelProfileId": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" }
+          ]
+        },
+        "referenceDigest": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/digest" }] },
+        "schemaDigest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "executor": { "const": "backend" } }, "required": ["executor"] },
+          "then": {
+            "properties": {
+              "host": { "enum": ["codex", "claude", "ollama"] },
+              "modelProfileId": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+              "referenceDigest": { "$ref": "#/$defs/digest" }
+            }
+          },
+          "else": {
+            "properties": {
+              "host": { "type": "null" },
+              "modelProfileId": { "type": "null" },
+              "referenceDigest": { "type": "null" }
+            }
+          }
+        }
+      ]
+    },
+    "result": {
+      "type": "object",
+      "required": ["status", "exitCode", "durationMs", "timedOut", "stdoutDigest", "stderrDigest", "sandboxProfileDigest"],
+      "properties": {
+        "status": { "enum": ["pass", "fail", "blocked"] },
+        "exitCode": { "type": ["integer", "null"] },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "timedOut": { "type": "boolean" },
+        "stdoutDigest": { "$ref": "#/$defs/digest" },
+        "stderrDigest": { "$ref": "#/$defs/digest" },
+        "sandboxProfileDigest": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "pass" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "exitCode": { "const": 0 },
+              "timedOut": { "const": false }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "blocked" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "exitCode": { "type": "null" },
+              "timedOut": { "const": false }
+            }
+          }
+        }
+      ]
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "digest", "mediaType", "sizeBytes"],
+        "properties": {
+          "path": { "$ref": "#/$defs/portablePath" },
+          "digest": { "$ref": "#/$defs/digest" },
+          "mediaType": { "type": "string", "pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$" },
+          "sizeBytes": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "taskId": { "type": "string", "pattern": "^T-[0-9]{8}T[0-9]{6}Z-[a-z2-7]{26}$" },
+    "operationId": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "utcDateTime": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,9})?Z$" },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\.\\.(?:/|$))(?!.*(?:/)\\.\\.(?:/|$))(?!.*//)(?!.*\\\\)[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$"
+    }
+  },
+  "additionalProperties": false
+}

@@ -311,6 +311,7 @@ Python 커널은 다음을 담당한다.
 │   ├── tasks/
 │   │   └── <task-id>/
 │   │       ├── state.json
+│   │       ├── request.json
 │   │       ├── request.md
 │   │       ├── planning-dialogue.json
 │   │       ├── plan.json
@@ -318,6 +319,7 @@ Python 커널은 다음을 담당한다.
 │   │       ├── execution.json
 │   │       ├── evidence/
 │   │       ├── events/
+│   │       ├── handoff.json
 │   │       └── handoff.md
 │   ├── runtime/
 │   │   ├── locks/
@@ -351,7 +353,9 @@ Python 커널은 다음을 담당한다.
   관리하는 링크와 설치 결과를 기록하는 로컬 manifest
 - `tasks/<task-id>/state.json`: authoritative state, revision, binding, checkpoint와
   `BLOCKED` 복귀 정보
-- `tasks/<task-id>/request.md`: 해당 태스크에 정규화된 최초 요청과 후속 범위 변경
+- `tasks/<task-id>/request.json`: schema로 검증한 최초 요청과 후속 범위 변경의
+  authoritative control data
+- `tasks/<task-id>/request.md`: `request.json`에서 결정적으로 렌더링한 사람용 표현
 - `tasks/<task-id>/planning-dialogue.json`: 확정 사실, 결정, 가정, 질문과 구간별
   승인 상태
 - `tasks/<task-id>/plan.json`: schema로 검증된 실행 단계, acceptance와 attempt 정책
@@ -360,7 +364,9 @@ Python 커널은 다음을 담당한다.
 - `tasks/<task-id>/execution.json`: run과 step별 attempt, 종료 사유 및 현재 실행 index
 - `tasks/<task-id>/evidence/`: command, backend, verifier와 artifact의 hash된 실행 증거
 - `tasks/<task-id>/events/`: 커널이 순서와 revision을 부여한 append-only 상태 사건
-- `tasks/<task-id>/handoff.md`: 검증 후 생성하는 인계 초안과 READY gate 입력
+- `tasks/<task-id>/handoff.json`: 검증 후 schema로 확정하는 READY gate 입력
+- `tasks/<task-id>/handoff.md`: `handoff.json`에서 결정적으로 렌더링한 사람용 인계
+  문서
 - `docs/work-items/<task-id>`: 승인된 요청·계획과 완료된 핸드오프의 Git 추적용
   렌더링 사본
 

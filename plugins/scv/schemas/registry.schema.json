@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:scv:schema:registry:1.0.0",
+  "title": "SCV operation registry",
+  "type": "object",
+  "required": ["schemaVersion", "registryVersion", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "registryVersion": { "const": "1.0.0" },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["operationId", "version", "executor", "reference", "outputSchema", "modelRole", "requiredInputs", "outputArtifact"],
+        "properties": {
+          "operationId": { "$ref": "#/$defs/operationId" },
+          "version": { "const": "1.0.0" },
+          "executor": { "enum": ["host", "kernel", "backend"] },
+          "reference": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/portablePath" }] },
+          "outputSchema": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/portablePath" }] },
+          "modelRole": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/roleId" }] },
+          "requiredInputs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]{0,63}$" }
+          },
+          "outputArtifact": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/portablePath" }] }
+        },
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": { "properties": { "executor": { "const": "backend" } }, "required": ["executor"] },
+            "then": {
+              "properties": {
+                "reference": { "$ref": "#/$defs/portablePath" },
+                "outputSchema": { "$ref": "#/$defs/portablePath" },
+                "modelRole": { "$ref": "#/$defs/roleId" }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "operationId": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+    "roleId": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!\\.\\.(?:/|$))(?!.*(?:/)\\.\\.(?:/|$))(?!.*//)(?!.*\\\\)[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$"
+    }
+  },
+  "additionalProperties": false
+}

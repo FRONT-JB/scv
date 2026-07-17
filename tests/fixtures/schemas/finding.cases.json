@@ -1,0 +1,181 @@
+{
+  "schema": "finding.schema.json",
+  "generatedInvalid": [
+    {"operation": "replace", "pointer": "/schemaVersion", "value": "9.9.9"},
+    {"operation": "add", "pointer": "/unknownField", "value": true}
+  ],
+  "valid": [
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-auth-boundary",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "source": { "kind": "codex_review", "operationId": "review-code" },
+      "location": { "path": "src/auth.py", "line": 17, "column": 3 },
+      "findingClass": "security_boundary",
+      "severity": "high",
+      "summary": "Credential boundary is not enforced",
+      "evidencePaths": ["tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/review.json"],
+      "action": "Remove the credential from the child environment.",
+      "status": "open",
+      "verdict": "must_fix",
+      "waiver": null
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-doc-gap",
+      "taskId": "T-20260717T010203Z-22222222222222222222222222",
+      "source": { "kind": "deterministic_verifier", "operationId": "verify-docs" },
+      "location": { "path": "README.md" },
+      "findingClass": "documentation",
+      "severity": "medium",
+      "summary": "A migration note is incomplete",
+      "evidencePaths": ["tasks/T-20260717T010203Z-22222222222222222222222222/evidence/000001.json"],
+      "action": "Add the migration limitation.",
+      "status": "waived",
+      "verdict": "waivable",
+      "waiver": {
+        "findingDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "impact": "Readers may need one clarification.",
+        "reason": "The release is intentionally documentation-only.",
+        "mitigation": "Track the missing note in the next task.",
+        "owner": "maintainer",
+        "expiresWhen": "Before the next minor release",
+        "approvalRevision": 1
+      }
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-style-note",
+      "taskId": "T-20260717T010203Z-22222222222222222222222222",
+      "source": { "kind": "codex_review", "operationId": "review-code" },
+      "location": { "path": "src/style.py" },
+      "findingClass": "maintainability",
+      "severity": "low",
+      "summary": "A local name could be clearer",
+      "evidencePaths": ["tasks/T-20260717T010203Z-22222222222222222222222222/evidence/review.json"],
+      "action": "Consider renaming the local variable.",
+      "status": "acknowledged",
+      "verdict": "advisory",
+      "waiver": null
+    },
+    {"schemaVersion":"1.0.0","findingId":"finding-low-boundary","taskId":"T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz","source":{"kind":"codex_review","operationId":"review-code"},"location":{"path":"src/auth.py","line":17,"column":3},"findingClass":"security_boundary","severity":"low","summary":"Low-severity boundary finding remains non-waivable","evidencePaths":["tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/review.json"],"action":"Remove the credential from the child environment.","status":"open","verdict":"must_fix","waiver":null}
+  ],
+  "invalid": [
+    { "schemaVersion": "2.0.0" },
+    { "schemaVersion": "1.0.0", "unexpected": true },
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-path",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "source": { "kind": "codex_review", "operationId": "review-code" },
+      "location": { "path": "src/../../etc/passwd" },
+      "findingClass": "security_boundary",
+      "severity": "high",
+      "summary": "Unsafe path",
+      "evidencePaths": ["evidence/review.json"],
+      "action": "Reject the path.",
+      "status": "open",
+      "verdict": "must_fix",
+      "waiver": null
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-illegal-waiver",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "source": { "kind": "codex_review", "operationId": "review-code" },
+      "location": { "path": "src/auth.py" },
+      "findingClass": "security_boundary",
+      "severity": "critical",
+      "summary": "Critical finding cannot be waived",
+      "evidencePaths": ["evidence/review.json"],
+      "action": "Fix it.",
+      "status": "waived",
+      "verdict": "waivable",
+      "waiver": {
+        "findingDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "impact": "Critical",
+        "reason": "None",
+        "mitigation": "None",
+        "owner": "maintainer",
+        "expiresWhen": "Never",
+        "approvalRevision": 1
+      }
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-doc-gap",
+      "taskId": "T-20260717T010203Z-22222222222222222222222222",
+      "source": { "kind": "deterministic_verifier", "operationId": "verify-docs" },
+      "location": { "path": "README.md" },
+      "findingClass": "security_boundary",
+      "severity": "medium",
+      "summary": "A migration note is incomplete",
+      "evidencePaths": ["tasks/T-20260717T010203Z-22222222222222222222222222/evidence/000001.json"],
+      "action": "Add the migration limitation.",
+      "status": "waived",
+      "verdict": "waivable",
+      "waiver": {
+        "findingDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "impact": "Readers may need one clarification.",
+        "reason": "The release is intentionally documentation-only.",
+        "mitigation": "Track the missing note in the next task.",
+        "owner": "maintainer",
+        "expiresWhen": "Before the next minor release",
+        "approvalRevision": 1
+      }
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-auth-boundary",
+      "taskId": "T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz",
+      "source": { "kind": "codex_review", "operationId": "review-code" },
+      "location": { "path": "src/auth.py", "line": 17, "column": 3 },
+      "findingClass": "security_boundary",
+      "severity": "high",
+      "summary": "Credential boundary is not enforced",
+      "evidencePaths": ["tasks/T-20260717T010203Z-abcdefghijklmnopqrstuvwxyz/evidence/review.json"],
+      "action": "Remove the credential from the child environment.",
+      "status": "open",
+      "verdict": "waivable",
+      "waiver": null
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-doc-gap",
+      "taskId": "T-20260717T010203Z-22222222222222222222222222",
+      "source": { "kind": "deterministic_verifier", "operationId": "verify-docs" },
+      "location": { "path": "README.md" },
+      "findingClass": "documentation",
+      "severity": "medium",
+      "summary": "A migration note is incomplete",
+      "evidencePaths": ["tasks/T-20260717T010203Z-22222222222222222222222222/evidence/000001.json"],
+      "action": "Add the migration limitation.",
+      "status": "waived",
+      "verdict": "advisory",
+      "waiver": {
+        "findingDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "impact": "Readers may need one clarification.",
+        "reason": "The release is intentionally documentation-only.",
+        "mitigation": "Track the missing note in the next task.",
+        "owner": "maintainer",
+        "expiresWhen": "Before the next minor release",
+        "approvalRevision": 1
+      }
+    },
+    {
+      "schemaVersion": "1.0.0",
+      "findingId": "finding-style-note",
+      "taskId": "T-20260717T010203Z-22222222222222222222222222",
+      "source": { "kind": "codex_review", "operationId": "review-code" },
+      "location": { "path": "src/style.py" },
+      "findingClass": "maintainability",
+      "severity": "low",
+      "summary": "A local name could be clearer",
+      "evidencePaths": ["tasks/T-20260717T010203Z-22222222222222222222222222/evidence/review.json"],
+      "action": "Consider renaming the local variable.",
+      "status": "acknowledged",
+      "verdict": "must_fix",
+      "waiver": null
+    }
+  ]
+}
