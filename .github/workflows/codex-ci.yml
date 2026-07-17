@@ -1,0 +1,204 @@
+name: Codex SCV 검증
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".agents/plugins/**"
+      - "plugins/codex/**"
+      - ".github/workflows/codex-ci.yml"
+  pull_request:
+    paths:
+      - ".agents/plugins/**"
+      - "plugins/codex/**"
+      - ".github/workflows/codex-ci.yml"
+
+jobs:
+  test:
+    runs-on: macos-15
+    name: macOS · 파이썬 ${{ matrix.python-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Codex SCV 테스트 실행
+        run: python -m unittest discover -s plugins/codex/scv/tests -p 'test_*.py' -v
+      - name: JSON 메타데이터 검증
+        run: |
+          python -m json.tool .agents/plugins/marketplace.json >/dev/null
+          python -m json.tool plugins/codex/scv/.codex-plugin/plugin.json >/dev/null
+
+  compatibility:
+    runs-on: macos-15
+    name: Codex 런타임 · 격리 경계 검증
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: 사용자 환경 결합 검사
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          roots = (Path("plugins/codex"), Path(".agents"))
+          forbidden = re.compile(
+              rb"\bjb-|\bcrg-|superpowers:|run-git|/Users/|origin/dev",
+              re.IGNORECASE,
+          )
+          findings = []
+
+          for root in roots:
+              if root.is_symlink():
+                  print(f"검사 대상 루트가 심볼릭 링크입니다: {root}", file=sys.stderr)
+                  raise SystemExit(1)
+              if not root.is_dir():
+                  print(f"검사 대상 디렉터리가 없습니다: {root}", file=sys.stderr)
+                  raise SystemExit(1)
+              for path in sorted(root.rglob("*")):
+                  if path.is_symlink():
+                      print(
+                          f"Codex 패키지에서 심볼릭 링크를 찾았습니다: {path}",
+                          file=sys.stderr,
+                      )
+                      raise SystemExit(1)
+                  if not path.is_file():
+                      continue
+                  try:
+                      lines = path.read_bytes().splitlines()
+                  except OSError as exc:
+                      print(f"파일을 읽을 수 없습니다: {path}: {exc}", file=sys.stderr)
+                      raise SystemExit(1) from exc
+                  for line_number, line in enumerate(lines, start=1):
+                      if forbidden.search(line):
+                          findings.append((path, line_number))
+
+          if findings:
+              print(
+                  "Codex 패키지에서 금지된 사용자 레벨 의존성을 찾았습니다.",
+                  file=sys.stderr,
+              )
+              for path, line_number in findings:
+                  print(f"- {path}:{line_number}", file=sys.stderr)
+              raise SystemExit(1)
+
+          print("사용자 환경 결합 검사를 통과했습니다.")
+          PY
+      - name: 공백 오류 검사
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            diff_args=("${PR_BASE_SHA}...${PR_HEAD_SHA}")
+          else
+            base_sha="$PUSH_BEFORE_SHA"
+            if [ -z "$base_sha" ] || [[ "$base_sha" =~ ^0+$ ]]; then
+              if git rev-parse --verify "${PUSH_AFTER_SHA}^" >/dev/null 2>&1; then
+                base_sha="$(git rev-parse "${PUSH_AFTER_SHA}^")"
+              else
+                base_sha="$(git hash-object -t tree /dev/null)"
+              fi
+            fi
+            diff_args=("$base_sha" "$PUSH_AFTER_SHA")
+          fi
+
+          if ! git diff --check "${diff_args[@]}"; then
+            echo "변경 범위에서 공백 오류를 찾았습니다." >&2
+            exit 1
+          fi
+          echo "변경 범위의 공백 오류 검사를 통과했습니다."
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Codex CLI 고정 버전 설치
+        run: npm install --global --silent --no-audit --no-fund @openai/codex@0.144.1
+      - name: Codex CLI와 Seatbelt 샌드박스 기동 확인
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_version="codex-cli 0.144.1"
+          actual_version="$(codex --version)"
+          if [ "$actual_version" != "$expected_version" ]; then
+            echo "Codex CLI 버전이 일치하지 않습니다. 예상: $expected_version, 실제: $actual_version" >&2
+            exit 1
+          fi
+          codex exec --help >/dev/null
+          codex sandbox --help >/dev/null
+
+          codex_home="$(mktemp -d "${RUNNER_TEMP}/codex-ci.XXXXXX")"
+          auth_source="${RUNNER_TEMP}/scv-ci-auth-source.json"
+          auth_link="${codex_home}/auth.json"
+          home_canary="$(mktemp "${HOME}/.scv-ci-home-canary.XXXXXX")"
+          workspace_probe="${GITHUB_WORKSPACE}/.scv-ci-workspace-probe"
+          trap 'rm -rf "$codex_home"; rm -f "$auth_source" "$home_canary" "$workspace_probe"' EXIT
+          printf '%s\n' '{"token":"dummy-ci-value"}' > "$auth_source"
+          printf '%s\n' 'dummy-home-value' > "$home_canary"
+          ln -s "$auth_source" "$auth_link"
+          printf '%s\n' \
+            'allow_login_shell = false' \
+            'default_permissions = "ci-smoke"' \
+            '' \
+            '[permissions.ci-smoke.filesystem]' \
+            '":root" = "read"' \
+            "\"$GITHUB_WORKSPACE\" = \"write\"" \
+            "\"$HOME/.codex\" = \"deny\"" \
+            "\"$HOME/.ssh\" = \"deny\"" \
+            "\"$HOME/.aws\" = \"deny\"" \
+            "\"$HOME/.gitconfig\" = \"deny\"" \
+            "\"$HOME/.npmrc\" = \"deny\"" \
+            "\"$HOME/.netrc\" = \"deny\"" \
+            "\"$home_canary\" = \"deny\"" \
+            "\"$auth_link\" = \"deny\"" \
+            "\"$auth_source\" = \"deny\"" \
+            '' \
+            '[permissions.ci-smoke.filesystem.":workspace_roots"]' \
+            '"." = "write"' \
+            '' \
+            '[permissions.ci-smoke.network]' \
+            'enabled = false' \
+            > "$codex_home/config.toml"
+
+          CODEX_HOME="$codex_home" codex sandbox \
+            -P ci-smoke \
+            --sandbox-state-disable-network \
+            -C "$GITHUB_WORKSPACE" \
+            -- sh -c '
+              if /bin/cat "$1" >/dev/null 2>&1; then
+                echo "사용자 홈의 차단 대상 파일을 읽을 수 있어 검증에 실패했습니다." >&2
+                exit 1
+              fi
+              if /bin/cat "$2" >/dev/null 2>&1; then
+                echo "격리된 인증 링크를 읽을 수 있어 검증에 실패했습니다." >&2
+                exit 1
+              fi
+              if /bin/cat "$3" >/dev/null 2>&1; then
+                echo "원본 인증 파일을 읽을 수 있어 검증에 실패했습니다." >&2
+                exit 1
+              fi
+              /usr/bin/touch "$4"
+              test -f "$4"
+              /bin/rm "$4"
+              node --version >/dev/null
+              npm --version >/dev/null
+              git status --short >/dev/null
+              echo "Seatbelt 민감 경로 차단과 작업공간·도구 실행이 정상 동작합니다."
+            ' sh "$home_canary" "$auth_link" "$auth_source" "$workspace_probe"
+          echo "Codex CLI $actual_version 및 Seatbelt 보안·호환성 검사를 통과했습니다."

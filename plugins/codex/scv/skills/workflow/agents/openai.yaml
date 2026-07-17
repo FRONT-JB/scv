@@ -1,0 +1,4 @@
+interface:
+  display_name: "SCV"
+  short_description: "macOS 승인 게이트·실패 학습 코드 변경 워크플로"
+  default_prompt: "$scv:workflow로 이 변경을 요구사항 접수부터 검증된 인계까지 진행해 주세요."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "SCV Improve"
+  short_description: "macOS SCV 실패 학습과 개선 제안 승인 흐름"
+  default_prompt: "$scv:improve로 실패 학습 후보와 SCV 개선 제안을 검토해 주세요."
