@@ -1,5 +1,14 @@
 # SCV
 
+> [!IMPORTANT]
+> **이 플러그인은 [ORCA Orchestration](https://github.com/FRONT-JB/skills/tree/main/orca/skills/scv)으로 대체되었습니다.**
+>
+> 신규 설치·유지보수·기능 추가는 아래 저장소를 사용하세요.
+>
+> **후속 위치:** https://github.com/FRONT-JB/skills/tree/main/orca/skills/scv
+>
+> 이 저장소의 Codex SCV 플러그인은 레거시 스냅샷으로 남겨 두며, 더 이상 활성 개발 대상이 아닙니다.
+
 ![SCV construction utility units cycling through Scope, Construct, Verify, and Improve](docs/assets/scv-readme-banner.png)
 
 > **S**cope → **C**onstruct → **V**erify. SCV good to go, sir.
